@@ -22,6 +22,7 @@ update_config() {
 }
 
 echo "Updating Redis and AMQP configuration in $CONFIG_FILE"
+update_config "jcli" "bind" "0.0.0.0"
 update_config "redis-client" "host" "$REDIS_CLIENT_HOST"
 update_config "redis-client" "port" "$REDIS_CLIENT_PORT"
 update_config "amqp-broker" "host" "$AMQP_BROKER_HOST"

@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir -e git+https://github.com/jookies/txamqp.git@mast
 COPY . .
 
 # Install application
-RUN pip install --no-cache-dir .
+#RUN pip install --no-cache-dir .
 
 # Install Gunicorn for REST API mode
 RUN pip install --no-cache-dir gunicorn
@@ -50,13 +50,6 @@ RUN pip install --no-cache-dir gunicorn
 #COPY misc/config/resource/*.xml "${RESOURCE_PATH}/"
 
 WORKDIR "${CONFIG_PATH}"
-
-# Modify configuration files
-RUN sed -i '/\[jcli\]/a bind=0.0.0.0' jasmin.cfg \
-    && sed -i "/\[redis-client\]/a port=\$REDIS_CLIENT_PORT" jasmin.cfg \
-    && sed -i "/\[amqp-broker\]/a port=\$AMQP_BROKER_PORT" jasmin.cfg \
-    && sed -i "/\[redis-client\]/a host=\$REDIS_CLIENT_HOST" jasmin.cfg \
-    && sed -i "/\[amqp-broker\]/a host=\$AMQP_BROKER_HOST" jasmin.cfg
 
 # Expose necessary ports
 EXPOSE 2775 8990 1401 8080
