@@ -72,10 +72,10 @@ services:
       - "${FORWARD_JASMIN_HTTP_PORT:-1401}:1401"
       - '${FORWARD_JASMIN_RESTAPI_PORT:-8080}:8080'
     volumes:
-      - jasmin_config:/etc/jasmin
-      - jasmin_store:/etc/jasmin/store
-      - jasmin_logs:/var/log/jasmin
-      - restapi_logs:/var/log/jasmin
+      - ./misc/config:/etc/jasmin
+      - ./misc/config/store:/etc/jasmin/store
+      - ./misc/config/resource:/etc/jasmin/resource
+      - ./misc/logs:/var/log/jasmin
     tmpfs:
       - /tmp
     networks:

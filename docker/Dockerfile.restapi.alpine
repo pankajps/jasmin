@@ -46,8 +46,8 @@ RUN pip install --no-cache-dir .
 RUN pip install --no-cache-dir gunicorn
 
 # Copy configuration files
-COPY misc/config/*.cfg "${CONFIG_PATH}/"
-COPY misc/config/resource/*.xml "${RESOURCE_PATH}/"
+#COPY misc/config/*.cfg "${CONFIG_PATH}/"
+#COPY misc/config/resource/*.xml "${RESOURCE_PATH}/"
 
 WORKDIR "${CONFIG_PATH}"
 
@@ -62,7 +62,7 @@ RUN sed -i '/\[jcli\]/a bind=0.0.0.0' jasmin.cfg \
 EXPOSE 2775 8990 1401 8080
 
 # Define volumes
-VOLUME ["/var/log/jasmin", "/etc/jasmin", "/etc/jasmin/store"]
+#VOLUME ["/var/log/jasmin", "/etc/jasmin", "/etc/jasmin/store"]
 
 # Copy entrypoint script and set permissions
 COPY docker/restapi-docker-entrypoint.sh /docker-entrypoint.sh
