@@ -1,71 +1,76 @@
 FROM python:3.11-alpine
 
-MAINTAINER Jookies LTD <jasmin@jookies.net>
+LABEL maintainer="Jookies LTD <jasmin@jookies.net>"
 
-# add our user and group first to make sure their IDs get assigned consistently, regardless of whatever dependencies get added
-RUN addgroup -S jasmin && adduser -S -g jasmin jasmin
+# Set environment variables
+ENV RESTAPI_MODE=0 \
+    RESTAPI_OLD_HTTP_HOST='127.0.0.1' \
+    ENABLE_PUBLISH_SUBMIT_SM_RESP=0 \
+    ROOT_PATH=/ \
+    CONFIG_PATH=/etc/jasmin \
+    RESOURCE_PATH=/etc/jasmin/resource \
+    STORE_PATH=/etc/jasmin/store \
+    LOG_PATH=/var/log/jasmin \
+    UNICODEMAP_JP=unicode-ascii
 
-# Install requirements
-RUN apk --update add \
-    gcc \
-    musl-dev \
-    libffi-dev \
-    openssl-dev \
-    python3-dev \
-    py3-pip \
-    git \
-    bash 
-
-# For RestAPI MODE
-ENV RESTAPI_MODE 0
-ENV RESTAPI_OLD_HTTP_HOST '127.0.0.1'
-
-ENV ENABLE_PUBLISH_SUBMIT_SM_RESP 0
-
-ENV ROOT_PATH /
-ENV CONFIG_PATH /etc/jasmin
-ENV RESOURCE_PATH /etc/jasmin/resource
-ENV STORE_PATH /etc/jasmin/store
-ENV LOG_PATH /var/log/jasmin
-
-RUN mkdir -p ${CONFIG_PATH} ${RESOURCE_PATH} ${STORE_PATH} ${LOG_PATH}
-RUN chown jasmin:jasmin ${CONFIG_PATH} ${RESOURCE_PATH} ${STORE_PATH} ${LOG_PATH}
+# Install dependencies and create jasmin user
+RUN apk add --no-cache \
+        gcc \
+        musl-dev \
+        libffi-dev \
+        openssl-dev \
+        python3-dev \
+        py3-pip \
+        git \
+        bash \
+    && addgroup -S jasmin \
+    && adduser -S -G jasmin jasmin \
+    && mkdir -p "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
+    && chown -R jasmin:jasmin "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}"
 
 WORKDIR /build
 
-RUN pip install -e git+https://github.com/jookies/txamqp.git@master#egg=txamqp3
-RUN pip install -e git+https://github.com/jookies/python-messaging.git@master#egg=python-messaging
-RUN pip install -e git+https://github.com/jookies/smpp.pdu.git@master#egg=smpp.pdu3
-RUN pip install -e git+https://github.com/jookies/smpp.twisted.git@master#egg=smpp.twisted3
+# Install required Python packages from git repositories
+RUN pip install --no-cache-dir -e git+https://github.com/jookies/txamqp.git@master#egg=txamqp3 \
+    && pip install --no-cache-dir -e git+https://github.com/jookies/python-messaging.git@master#egg=python-messaging \
+    && pip install --no-cache-dir -e git+https://github.com/jookies/smpp.pdu.git@master#egg=smpp.pdu3 \
+    && pip install --no-cache-dir -e git+https://github.com/jookies/smpp.twisted.git@master#egg=smpp.twisted3
 
+# Copy application code
 COPY . .
 
-RUN pip install .
+# Install application
+RUN pip install --no-cache-dir .
 
-# For RestAPI MODE
-RUN pip install gunicorn
+# Install Gunicorn for REST API mode
+RUN pip install --no-cache-dir gunicorn
 
-ENV UNICODEMAP_JP unicode-ascii
+# Copy configuration files
+COPY misc/config/*.cfg "${CONFIG_PATH}/"
+COPY misc/config/resource/*.xml "${RESOURCE_PATH}/"
 
-COPY misc/config/*.cfg ${CONFIG_PATH}/
-COPY misc/config/resource/*.xml ${RESOURCE_PATH}/
+WORKDIR "${CONFIG_PATH}"
 
-WORKDIR /etc/jasmin
+# Modify configuration files
+RUN sed -i '/\[jcli\]/a bind=0.0.0.0' jasmin.cfg \
+    && sed -i "/\[redis-client\]/a port=\$REDIS_CLIENT_PORT" jasmin.cfg \
+    && sed -i "/\[amqp-broker\]/a port=\$AMQP_BROKER_PORT" jasmin.cfg \
+    && sed -i "/\[redis-client\]/a host=\$REDIS_CLIENT_HOST" jasmin.cfg \
+    && sed -i "/\[amqp-broker\]/a host=\$AMQP_BROKER_HOST" jasmin.cfg
 
-# Change binding host for jcli
-RUN sed -i '/\[jcli\]/a bind=0.0.0.0' ${CONFIG_PATH}/jasmin.cfg
-# Change binding port for redis, and amqp
-RUN sed -i "/\[redis-client\]/a port=$REDIS_CLIENT_PORT" ${CONFIG_PATH}/jasmin.cfg
-RUN sed -i "/\[amqp-broker\]/a port=$AMQP_BROKER_PORT" ${CONFIG_PATH}/jasmin.cfg
-# Change binding host for redis, and amqp
-RUN sed -i "/\[redis-client\]/a host=$REDIS_CLIENT_HOST" ${CONFIG_PATH}/jasmin.cfg
-RUN sed -i "/\[amqp-broker\]/a host=$AMQP_BROKER_HOST" ${CONFIG_PATH}/jasmin.cfg
-
+# Expose necessary ports
 EXPOSE 2775 8990 1401 8080
+
+# Define volumes
 VOLUME ["/var/log/jasmin", "/etc/jasmin", "/etc/jasmin/store"]
 
+# Copy entrypoint script and set permissions
 COPY docker/restapi-docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Switch to non-root user
+USER jasmin
+
+# Set entrypoint and command
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["jasmind.py", "--enable-interceptor-client", "--enable-dlr-thrower", "--enable-dlr-lookup", "-u", "jcliadmin", "-p", "jclipwd"]
-# Notes:
-# - jasmind is started with native dlr-thrower and dlr-lookup threads instead of standalone processes

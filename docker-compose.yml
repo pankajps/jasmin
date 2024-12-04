@@ -1,55 +1,204 @@
-version: "3.10"
-
 services:
   redis:
-    image: redis:alpine
+    image: redis:7.4.1-alpine
     restart: unless-stopped
+    volumes:
+      - redis:/data
+    networks:
+      - jasmin
     healthcheck:
-      test: redis-cli ping | grep PONG
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     deploy:
       resources:
         limits:
           cpus: '0.2'
           memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   rabbit-mq:
-    image: rabbitmq:3.10-management-alpine
+    image: rabbitmq:4.0.4-alpine
     restart: unless-stopped
+    volumes:
+      - rabbitmq:/var/lib/rabbitmq
+    networks:
+      - jasmin
     healthcheck:
-      test: rabbitmq-diagnostics -q ping
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 10s
     deploy:
       resources:
         limits:
           cpus: '0.5'
           memory: 525M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
     security_opt:
       - no-new-privileges:true
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   jasmin:
     build:
       context: ./
-      dockerfile: ./docker/Dockerfile.dev
+      dockerfile: ./docker/Dockerfile.restapi.alpine
+    image: jasmin:restapi
     restart: unless-stopped
-    volumes:
-      - ./jasmin:/usr/jasmin/jasmin
     ports:
-      - 2775:2775
-      - 8990:8990
-      - 1401:1401
+      - "${FORWARD_JASMIN_SMPP_PORT:-2775}:2775"
+      - "${FORWARD_JASMIN_CLI_PORT:-8990}:8990"
+      - "${FORWARD_JASMIN_HTTP_PORT:-1401}:1401"
+      - '${FORWARD_JASMIN_RESTAPI_PORT:-8080}:8080'
+    volumes:
+      - jasmin_config:/etc/jasmin
+      - jasmin_store:/etc/jasmin/store
+      - jasmin_logs:/var/log/jasmin
+      - restapi_logs:/var/log/jasmin
+    tmpfs:
+      - /tmp
+    networks:
+      - jasmin
     depends_on:
       redis:
         condition: service_healthy
       rabbit-mq:
         condition: service_healthy
     environment:
-      REDIS_CLIENT_HOST: redis
-      AMQP_BROKER_HOST: rabbit-mq
+      REDIS_CLIENT_HOST: "${REDIS_CLIENT_HOST:-redis}"
+      REDIS_CLIENT_PORT: "${REDIS_CLIENT_PORT:-6379}"
+      AMQP_BROKER_HOST: "${AMQP_BROKER_HOST:-rabbit-mq}"
+      AMQP_BROKER_PORT: "${AMQP_BROKER_PORT:-5672}"
+      ENABLE_PUBLISH_SUBMIT_SM_RESP: "${ENABLE_PUBLISH_SUBMIT_SM_RESP:-1}"
+      RESTAPI_MODE: "${RESTAPI_MODE:-0}"
+      RESTAPI_OLD_HTTP_HOST: ${RESTAPI_OLD_HTTP_HOST:-jasmin}
     deploy:
       resources:
         limits:
           cpus: '1'
           memory: 256M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
     security_opt:
       - no-new-privileges:true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus/config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - monitoring_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - jasmin
+    ports:
+      - 9090:9090
+    networks:
+      - jasmin
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    ports:
+      - 3000:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GF_SECURITY_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:-admin}"
+      GF_INSTALL_PLUGINS: "grafana-clock-panel,grafana-simple-json-datasource"
+    volumes:
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/dashboards:/opt/grafana-dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - jasmin
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  jasmin:
+    driver: bridge
+
+volumes:
+  jasmin_config:
+  jasmin_store:
+  jasmin_logs:
+  restapi_logs:
+  rabbitmq:
+  redis:
+  grafana_data:
+  monitoring_data:
