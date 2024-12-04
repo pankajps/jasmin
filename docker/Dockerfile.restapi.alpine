@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir -e git+https://github.com/jookies/txamqp.git@mast
 COPY . .
 
 # Install application
-#RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir .
 
 # Install Gunicorn for REST API mode
 RUN pip install --no-cache-dir gunicorn
