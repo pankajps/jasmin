@@ -18,8 +18,9 @@ update_config() {
   local section="$1"
   local key="$2"
   local value="$3"
-  sed -i "/\[$section\]/,/\[/{s/^$key=.*/$key=$value/}" "$CONFIG_FILE"
+  sed -i "/^\[$section\]/,/^\[/{s/^[[:space:]]*#\?[[:space:]]*$key[[:space:]]*=.*/$key=$value/}" "$CONFIG_FILE"
 }
+
 
 echo "Updating Redis and AMQP configuration in $CONFIG_FILE"
 update_config "jcli" "bind" "0.0.0.0"
