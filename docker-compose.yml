@@ -29,7 +29,7 @@ services:
         max-file: "3"
 
   rabbit-mq:
-    image: rabbitmq:4.0.4-alpine
+    image: rabbitmq:4.0.4-management-alpine
     restart: unless-stopped
     volumes:
       - rabbitmq:/var/lib/rabbitmq
