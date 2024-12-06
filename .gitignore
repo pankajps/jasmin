@@ -58,3 +58,5 @@ celerybeat-schedule.db
 *.rpm
 
 .env
+
+jasmin-api
