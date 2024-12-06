@@ -43,7 +43,7 @@ if [ "$RESTAPI_MODE" = "1" ]; then
   sed -i "s|^\(.*result_backend\s*=\s*\).*|\1'redis://@$REDIS_CLIENT_HOST:$REDIS_CLIENT_PORT/1'|" "$CONFIG_PY"
 
   echo 'Starting Jasmin REST API using Gunicorn'
-  exec gunicorn -b 0.0.0.0:8080 jasmin.protocols.rest:api \
+  gunicorn -b 0.0.0.0:8080 jasmin.protocols.rest:api \
     --access-logfile /var/log/jasmin/rest-api.access.log \
     --disable-redirect-access-to-syslog
 else
@@ -55,17 +55,16 @@ else
     echo 'Disabling publish_submit_sm_resp in jasmin.cfg'
     sed -i "s/^.*publish_submit_sm_resp\s*=.*/publish_submit_sm_resp = False/" "$CONFIG_FILE"
   fi
-
-  # Start interceptord if requested
-  if [ "${2:-}" = "--enable-interceptor-client" ]; then
-    if command -v interceptord.py >/dev/null 2>&1; then
-      echo 'Starting interceptord'
-      interceptord.py &
-    else
-      echo 'Warning: interceptord.py not found, skipping'
-    fi
-  fi
-
-  echo 'Starting jasmind with arguments: '"$*"
-  exec "$@"
 fi
+
+# Start interceptord if requested
+if [ "${2:-}" = "--enable-interceptor-client" ]; then
+  if command -v interceptord.py >/dev/null 2>&1; then
+    echo 'Starting interceptord'
+    interceptord.py &
+  else
+    echo 'Warning: interceptord.py not found, skipping'
+  fi
+fi
+echo 'Starting jasmind with arguments: '"$*"
+exec "$@"

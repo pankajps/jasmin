@@ -3,79 +3,117 @@ import os
 import sys
 import uuid
 import re
-import requests
-
-import jasmin
-from .config import *
-from .tasks import httpapi_send
 from datetime import datetime
-from falcon import HTTPInternalServerError, HTTPPreconditionFailed
+
+import requests
 import falcon
 
-sys.path.append("%s/vendor" % os.path.dirname(os.path.abspath(jasmin.__file__)))
+import jasmin
+from .config import (
+    old_api_uri,
+    http_throughput_per_worker,
+    smart_qos
+)
+from .tasks import httpapi_send
+
+sys.path.append(f"{os.path.dirname(os.path.abspath(jasmin.__file__))}/vendor")
 
 
 class JasminHttpApiProxy:
-    """Provides a WS caller for old Jasmin http api"""
+    """A proxy class to call the old Jasmin httpapi endpoints."""
 
-    def call_jasmin(self, url, params=None):
+    def call_jasmin(self, url: str, params: dict = None) -> (int, str):
+        """Call the old Jasmin httpapi and return (status_code, response_body)"""
+        full_url = f"{old_api_uri}/{url}"
         try:
-            r = requests.get('%s/%s' % (old_api_uri, url), params=params)
+            response = requests.get(full_url, params=params)
         except requests.exceptions.ConnectionError as e:
-            raise HTTPInternalServerError('Jasmin httpapi connection error',
-                                          'Could not connect to Jasmin http api (%s): %s' % (old_api_uri, e))
+            raise falcon.HTTPInternalServerError(
+                title='Jasmin httpapi connection error',
+                description=f"Could not connect to Jasmin http api ({old_api_uri}): {e}"
+            )
         except Exception as e:
-            raise HTTPInternalServerError('Jasmin httpapi unknown error', str(e))
-        else:
-            return r.status_code, r.content.decode('utf-8').strip('"')
+            raise falcon.HTTPInternalServerError(
+                title='Jasmin httpapi unknown error',
+                description=str(e)
+            )
+
+        return response.status_code, response.text.strip('"')
 
 
 class JasminRestApi:
-    """Parent class for all rest api resources"""
+    """Base class for all REST API resources providing common functionalities."""
 
-    def build_response_from_proxy_result(self, response, result):
-        """Make a unified response format for requests going to old Jasmin http api"""
+    def build_response_from_proxy_result(self, response: falcon.Response, result: tuple):
+        """
+        Build a unified response format from the old Jasmin httpapi call result.
 
-        if result[0] != 200:
-            response.body = json.dumps({'message': result[1]})
+        :param response: falcon.Response object
+        :param result: A tuple (status_code, response_text)
+        """
+        status_code, content = result
+        # Attempt to parse content as JSON if possible
+        parsed_content = None
+        if status_code == 200:
+            # Try to load as JSON
+            try:
+                parsed_content = json.loads(content)
+            except json.JSONDecodeError:
+                # Not a valid JSON, treat it as a string response
+                parsed_content = content
+            response.body = json.dumps({'data': parsed_content})
         else:
-            if '{' in result[1]:
-                # It's a json result
-                response.body = {'data': json.loads(result[1])}
-            else:
-                response.body = {'data': result[1]}
-        response.status = getattr(falcon, 'HTTP_%s' % result[0])
+            # Error from Jasmin old api: directly send message as is
+            response.body = json.dumps({'message': content})
 
-    def decode_request_data(self, request):
-        """Decode the request stream and return a valid json"""
+        response.status = getattr(falcon, f'HTTP_{status_code}', falcon.HTTP_500)
 
+    def decode_request_data(self, request: falcon.Request) -> dict:
+        """
+        Decode the request stream and return a valid JSON dictionary.
+
+        :param request: falcon.Request object
+        :return: Decoded JSON as Python dict
+        :raises falcon.HTTPPreconditionFailed: If the JSON cannot be parsed
+        """
+        request_data = request.stream.read()
         try:
-            request_data = request.stream.read()
             params = json.loads(request_data)
-        except Exception as e:
-            raise HTTPPreconditionFailed('Cannot parse JSON data',
-                                         'Got unparseable json data: %s' % request_data)
-        else:
-            return params
+        except Exception:
+            raise falcon.HTTPPreconditionFailed(
+                title='Cannot parse JSON data',
+                description=f'Got unparseable json data: {request_data}'
+            )
+        return params
+
+    def replace_underscores_in_keys(self, param_dict: dict) -> dict:
+        """
+        Replace underscores with dashes in keys to comply with old Jasmin API constraints.
+
+        :param param_dict: Dictionary of parameters
+        :return: New dictionary with transformed keys
+        """
+        transformed = {}
+        for k, v in param_dict.items():
+            new_key = re.sub('_', '-', k)
+            transformed[new_key] = v
+        return transformed
 
 
 class PingResource(JasminRestApi, JasminHttpApiProxy):
-    def on_get(self, request, response):
+    def on_get(self, request: falcon.Request, response: falcon.Response):
         """
-        GET /ping request processing
-
-        Note: Ping is used to check Jasmin's http api
+        GET /ping request:
+        Check if Jasmin's httpapi is responsive.
         """
-
         self.build_response_from_proxy_result(response, self.call_jasmin('ping'))
 
 
 class BalanceResource(JasminRestApi, JasminHttpApiProxy):
-    def on_get(self, request, response):
+    def on_get(self, request: falcon.Request, response: falcon.Response):
         """
-        GET /secure/balance request processing
-
-        Note: Balance is used by user to check his balance
+        GET /secure/balance request:
+        Allows the user to check their balance.
         """
         self.build_response_from_proxy_result(
             response,
@@ -90,169 +128,160 @@ class BalanceResource(JasminRestApi, JasminHttpApiProxy):
 
 
 class RateResource(JasminRestApi, JasminHttpApiProxy):
-    def on_get(self, request, response):
+    def on_get(self, request: falcon.Request, response: falcon.Response):
         """
-        GET /secure/rate request processing
-
-        Note: This method will indicate the rate of the message once sent
+        GET /secure/rate request:
+        Indicates the rate of the message once sent.
         """
-
         request_args = request.params.copy()
         request_args.update({
             'username': request.context.get('username'),
             'password': request.context.get('password')
         })
 
-        # Convert _ to -
-        # Added for compliance with json encoding/decoding constraints on dev env like .Net
-        _request_args = request_args.copy() # void dictionary key change error in python 3.8
-        for k, v in _request_args.items():
-            del (request_args[k])
-            request_args[re.sub('_', '-', k)] = v
-            
-        del _request_args # Unset the variable
+        # Replace underscores with dashes in keys
+        request_args = self.replace_underscores_in_keys(request_args)
 
         self.build_response_from_proxy_result(
             response,
-            self.call_jasmin(
-                'rate',
-                params=request_args
-            )
+            self.call_jasmin('rate', params=request_args)
         )
 
 
 class SendResource(JasminRestApi, JasminHttpApiProxy):
-    def on_post(self, request, response):
+    def on_post(self, request: falcon.Request, response: falcon.Response):
         """
-        POST /secure/send request processing
-
-        Note: Calls Jasmin http api /send resource
+        POST /secure/send request:
+        Calls Jasmin http api /send resource.
         """
-
         request_args = self.decode_request_data(request).copy()
         request_args.update({
             'username': request.context.get('username'),
             'password': request.context.get('password')
         })
 
-        # Convert _ to -
-        # Added for compliance with json encoding/decoding constraints on dev env like .Net
-        _request_args = request_args.copy() # void dictionary key change error in python 3.8
-        for k, v in _request_args.items():
-            del (request_args[k])
-            request_args[re.sub('_', '-', k)] = v
-
-        del _request_args # Unset the variable
+        request_args = self.replace_underscores_in_keys(request_args)
 
         self.build_response_from_proxy_result(
             response,
-            self.call_jasmin(
-                'send',
-                params=request_args
-            )
+            self.call_jasmin('send', params=request_args)
         )
 
 
 class SendBatchResource(JasminRestApi, JasminHttpApiProxy):
-    def parse_schedule_at(self, val):
+    def parse_schedule_at(self, val: str) -> int:
         """
-        Tries to parse the schedule_at parameter and get the datetime value for scheduling
-        :param val: schedule_at rest parameter
-        :return: countdown in seconds or raising HTTPPreconditionFailed if parsing errored
-        """
+        Parse the schedule_at parameter and return a countdown in seconds.
 
+        Accepted formats:
+        - 'YYYY-MM-DD HH:MM:SS'
+        - '<number>s' (e.g. '3600s' for 1 hour)
+
+        :param val: The schedule_at string from the request
+        :return: Countdown in seconds
+        :raises falcon.HTTPPreconditionFailed: if the date is invalid or in the past
+        """
         if val is None:
             return 0
-        else:
-            # Do we have a ISO Date format ?
-            try:
-                schedule_at = datetime.strptime(val, '%Y-%m-%d %H:%M:%S')
 
-                if schedule_at < datetime.now():
-                    raise HTTPPreconditionFailed('Cannot schedule batch in past date',
-                                                        "Invalid past date given: %s" % schedule_at)
-            except ValueError:
-                # Do we have Seconds format ?
-                m = re.match("^(\d+)s$", val)
-                if not m:
-                    raise HTTPPreconditionFailed('Cannot parse scheduled_at value',
-                                                        ("Got unknown format: %s, correct formats are "
-                                                         "'YYYY-MM-DD mm:hh:ss' or number of seconds, "
-                                                         "c.f. http://docs.jasminsms.com/en/latest/apis/rest") % val)
+        # Try ISO format first
+        try:
+            schedule_at = datetime.strptime(val, '%Y-%m-%d %H:%M:%S')
+            if schedule_at < datetime.now():
+                raise falcon.HTTPPreconditionFailed(
+                    title='Cannot schedule batch in past date',
+                    description=f"Invalid past date given: {schedule_at}"
+                )
+            return int((schedule_at - datetime.now()).total_seconds())
+        except ValueError:
+            # Try seconds format
+            match = re.match(r"^(\d+)s$", val)
+            if not match:
+                raise falcon.HTTPPreconditionFailed(
+                    title='Cannot parse scheduled_at value',
+                    description=(
+                        f"Got unknown format: {val}, correct formats are 'YYYY-MM-DD HH:MM:SS' "
+                        "or number of seconds followed by 's', e.g. '3600s'. "
+                        "Refer to http://docs.jasminsms.com/en/latest/apis/rest."
+                    )
+                )
+            return int(match.group(1))
 
-                return int(m.group(1))
-            else:
-                return (schedule_at - datetime.now()).total_seconds()
-
-    def on_post(self, request, response):
+    def on_post(self, request: falcon.Request, response: falcon.Response):
         """
-        POST /secure/sendbatch request processing
-
-        Note: Calls Jasmin http api /send resource
+        POST /secure/sendbatch request:
+        Schedule or immediately send a batch of messages through the Jasmin http api.
         """
-
-        # Authentify user before proceeding
+        # Authenticate user first
         status, _ = self.call_jasmin('balance', params={
             'username': request.context.get('username'),
             'password': request.context.get('password')
         })
         if status != 200:
-            raise HTTPPreconditionFailed('Authentication failed',
-                                         "Authentication failed for user: %s" % request.context.get('username'))
+            raise falcon.HTTPPreconditionFailed(
+                title='Authentication failed',
+                description=f"Authentication failed for user: {request.context.get('username')}"
+            )
 
         batch_id = uuid.uuid4()
         params = self.decode_request_data(request)
         config = {'throughput': http_throughput_per_worker, 'smart_qos': smart_qos}
 
-        # Batch scheduling
+        # Determine scheduling
         countdown = self.parse_schedule_at(params.get('batch_config', {}).get('schedule_at', None))
 
         message_count = 0
-        for _message_params in params.get('messages', {}):
-            # Construct message params
-            message_params = {'username': request.context.get('username'),
-                              'password': request.context.get('password')}
+        # Iterate over each message and schedule/send it
+        for msg_params in params.get('messages', {}):
+            # Construct message parameters
+            message_params = {
+                'username': request.context.get('username'),
+                'password': request.context.get('password')
+            }
             message_params.update(params.get('globals', {}))
-            message_params.update(_message_params)
+            message_params.update(msg_params)
 
-            # Convert _ to -
-            # Added for compliance with json encoding/decoding constraints on dev env like .Net
-            _message_params = message_params.copy() # Avoid dictionary key changed error in python 3.8
-            for k, v in _message_params.items():
-                del (message_params[k])
-                message_params[re.sub('_', '-', k)] = v
+            message_params = self.replace_underscores_in_keys(message_params)
 
-            del _message_params # Unset the variable
-
-            # Ignore message if these args are not found
-            if 'to' not in message_params or ('content' not in message_params and 'hex-content' not in message_params):
+            # Ignore messages missing essential parameters
+            if 'to' not in message_params or (
+                    'content' not in message_params and 'hex-content' not in message_params):
                 continue
 
-            # Do we have multiple destinations for this message ?
+            # Handle multiple recipients
             if isinstance(message_params.get('to', ''), list):
-                to_list = message_params.get('to')
-                for _to in to_list:
-                    message_params['to'] = _to
+                recipients = message_params.pop('to')
+                for recipient in recipients:
+                    single_msg_params = message_params.copy()
+                    single_msg_params['to'] = recipient
                     if countdown == 0:
-                        httpapi_send.delay(batch_id, params.get('batch_config', {}), message_params, config)
+                        httpapi_send.delay(batch_id, params.get('batch_config', {}), single_msg_params, config)
                     else:
                         httpapi_send.apply_async(
-                            args=[batch_id, params.get('batch_config', {}), message_params, config],
-                            countdown=countdown)
+                            args=[batch_id, params.get('batch_config', {}), single_msg_params, config],
+                            countdown=countdown
+                        )
                     message_count += 1
             else:
+                # Single recipient
                 if countdown == 0:
                     httpapi_send.delay(batch_id, params.get('batch_config', {}), message_params, config)
                 else:
                     httpapi_send.apply_async(
-                        args=[batch_id, params.get('batch_config', {}), message_params, config], countdown=countdown)
+                        args=[batch_id, params.get('batch_config', {}), message_params, config],
+                        countdown=countdown
+                    )
                 message_count += 1
 
-        response.body = {
+        # Build response
+        response_data = {
             'data': {
-                "batchId": '%s' % batch_id,
+                "batchId": str(batch_id),
                 "messageCount": message_count
             }
         }
         if countdown > 0:
-            response.body['data']['scheduled'] = '%ss' % countdown
+            response_data['data']['scheduled'] = f'{countdown}s'
+
+        response.body = json.dumps(response_data)
+        response.status = falcon.HTTP_200

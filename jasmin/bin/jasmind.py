@@ -1,10 +1,11 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 import os
 import signal
 import sys
 import traceback
 import logging
+from typing import Optional
 
 from lockfile import FileLock, LockTimeout, AlreadyLocked
 from twisted.cred import portal
@@ -34,32 +35,33 @@ from jasmin.routing.configs import RouterPBConfig, deliverSmThrowerConfig, DLRTh
 from jasmin.routing.router import RouterPB
 from jasmin.routing.throwers import deliverSmThrower, DLRThrower
 from jasmin.tools.cred.checkers import RouterAuthChecker
-from jasmin.tools.cred.portal import JasminPBRealm
-from jasmin.tools.cred.portal import SmppsRealm
+from jasmin.tools.cred.portal import JasminPBRealm, SmppsRealm
 from jasmin.tools.spread.pb import JasminPBPortalRoot
 from jasmin.config import ROOT_PATH
 from jasmin.bin import BaseDaemon
 
-CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
-
+CONFIG_PATH = os.getenv('CONFIG_PATH', f'{ROOT_PATH}/etc/jasmin/')
 LOG_CATEGORY = "jasmin-daemon"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)-8s %(process)d %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    stream=sys.stdout
+)
 
 
 class Options(usage.Options):
     optParameters = [
-        ['config', 'c', '%s/jasmin.cfg' % CONFIG_PATH,
-         'Jasmin configuration file'],
-        ['username', 'u', None,
-         'jCli username used to load configuration profile on startup'],
-        ['password', 'p', None,
-         'jCli password used to load configuration profile on startup'],
+        ['config', 'c', f'{CONFIG_PATH}/jasmin.cfg', 'Jasmin configuration file'],
+        ['username', 'u', None, 'jCli username used to load configuration profile on startup'],
+        ['password', 'p', None, 'jCli password used to load configuration profile on startup'],
     ]
 
     optFlags = [
         ['disable-smpp-server', None, 'Do not start SMPP Server service'],
         ['enable-dlr-thrower', None, 'Enable DLR Thrower service (not recommended: start the dlrd daemon instead)'],
         ['enable-dlr-lookup', None, 'Enable DLR Lookup service (not recommended: start the dlrlookupd daemon instead)'],
-        # @TODO: deliver-thrower must be executed as a standalone process, just like dlr-thrower
         ['disable-deliver-thrower', None, 'Do not start DeliverSm Thrower service'],
         ['disable-http-api', None, 'Do not start HTTP API'],
         ['disable-jcli', None, 'Do not start jCli console'],
@@ -69,457 +71,423 @@ class Options(usage.Options):
 
 class JasminDaemon(BaseDaemon):
     def __init__(self, opt):
-        super(JasminDaemon, self).__init__(opt)
-
+        super().__init__(opt)
         self.log = logging.getLogger(LOG_CATEGORY)
-        self.log.setLevel(logging.INFO)
-        handler = logging.StreamHandler(sys.stdout)
-        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(process)d %(message)s', '%Y-%m-%d %H:%M:%S')
-        handler.setFormatter(formatter)
-        self.log.addHandler(handler)
-        self.log.propagate = False
+        self.log.propagate = False  # Already configured with basicConfig
 
     @defer.inlineCallbacks
     def startRedisClient(self):
-        """Start AMQP Broker"""
-        RedisForJasminConfigInstance = RedisForJasminConfig(self.options['config'])
-        self.components['rc'] = yield ConnectionWithConfiguration(RedisForJasminConfigInstance)
-        # Authenticate and select db
-        if RedisForJasminConfigInstance.password is not None:
-            yield self.components['rc'].auth(RedisForJasminConfigInstance.password)
-            yield self.components['rc'].select(RedisForJasminConfigInstance.dbid)
+        """Connect and initialize the Redis client."""
+        redis_config = RedisForJasminConfig(self.options['config'])
+        self.components['rc'] = yield ConnectionWithConfiguration(redis_config)
+        # Authenticate and select db if needed
+        if redis_config.password is not None:
+            yield self.components['rc'].auth(redis_config.password)
+            yield self.components['rc'].select(redis_config.dbid)
 
     def stopRedisClient(self):
-        """Stop AMQP Broker"""
+        """Disconnect Redis client."""
         return self.components['rc'].disconnect()
 
     def startAMQPBrokerService(self):
-        """Start AMQP Broker"""
-
-        AMQPServiceConfigInstance = AmqpConfig(self.options['config'])
-        self.components['amqp-broker-factory'] = AmqpFactory(AMQPServiceConfigInstance)
+        """Start AMQP Broker service."""
+        amqp_conf = AmqpConfig(self.options['config'])
+        self.components['amqp-broker-factory'] = AmqpFactory(amqp_conf)
         self.components['amqp-broker-factory'].preConnect()
 
         # Add service
         self.components['amqp-broker-client'] = reactor.connectTCP(
-            AMQPServiceConfigInstance.host,
-            AMQPServiceConfigInstance.port,
-            self.components['amqp-broker-factory'])
+            amqp_conf.host,
+            amqp_conf.port,
+            self.components['amqp-broker-factory']
+        )
 
     def stopAMQPBrokerService(self):
-        """Stop AMQP Broker"""
-
+        """Stop AMQP Broker service."""
         return self.components['amqp-broker-client'].disconnect()
 
     def startRouterPBService(self):
-        """Start Router PB server"""
-
-        RouterPBConfigInstance = RouterPBConfig(self.options['config'])
-        self.components['router-pb-factory'] = RouterPB(RouterPBConfigInstance)
+        """Start RouterPB server."""
+        router_conf = RouterPBConfig(self.options['config'])
+        self.components['router-pb-factory'] = RouterPB(router_conf)
 
         # Set authentication portal
         p = portal.Portal(JasminPBRealm(self.components['router-pb-factory']))
-        if RouterPBConfigInstance.authentication:
+        if router_conf.authentication:
             c = InMemoryUsernamePasswordDatabaseDontUse()
-            c.addUser(RouterPBConfigInstance.admin_username,
-                      RouterPBConfigInstance.admin_password)
+            c.addUser(router_conf.admin_username, router_conf.admin_password)
             p.registerChecker(c)
         else:
             p.registerChecker(AllowAnonymousAccess())
-        jPBPortalRoot = JasminPBPortalRoot(p)
+        jpb_root = JasminPBPortalRoot(p)
 
-        # Add service
         self.components['router-pb-server'] = reactor.listenTCP(
-            RouterPBConfigInstance.port,
-            pb.PBServerFactory(jPBPortalRoot),
-            interface=RouterPBConfigInstance.bind)
+            router_conf.port,
+            pb.PBServerFactory(jpb_root),
+            interface=router_conf.bind
+        )
 
         # AMQP Broker is used to listen to deliver_sm/dlr queues
         return self.components['router-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopRouterPBService(self):
-        """Stop Router PB server"""
+        """Stop Router PB server."""
         return self.components['router-pb-server'].stopListening()
 
     def startSMPPClientManagerPBService(self):
-        """Start SMPP Client Manager PB server"""
-
-        SMPPClientPBConfigInstance = SMPPClientPBConfig(self.options['config'])
-        self.components['smppcm-pb-factory'] = SMPPClientManagerPB(SMPPClientPBConfigInstance)
+        """Start SMPP Client Manager PB server."""
+        smpp_client_conf = SMPPClientPBConfig(self.options['config'])
+        self.components['smppcm-pb-factory'] = SMPPClientManagerPB(smpp_client_conf)
 
         # Set authentication portal
         p = portal.Portal(JasminPBRealm(self.components['smppcm-pb-factory']))
-        if SMPPClientPBConfigInstance.authentication:
+        if smpp_client_conf.authentication:
             c = InMemoryUsernamePasswordDatabaseDontUse()
-            c.addUser(SMPPClientPBConfigInstance.admin_username, SMPPClientPBConfigInstance.admin_password)
+            c.addUser(smpp_client_conf.admin_username, smpp_client_conf.admin_password)
             p.registerChecker(c)
         else:
             p.registerChecker(AllowAnonymousAccess())
-        jPBPortalRoot = JasminPBPortalRoot(p)
+        jpb_root = JasminPBPortalRoot(p)
 
-        # Add service
         self.components['smppcm-pb-server'] = reactor.listenTCP(
-            SMPPClientPBConfigInstance.port,
-            pb.PBServerFactory(jPBPortalRoot),
-            interface=SMPPClientPBConfigInstance.bind)
+            smpp_client_conf.port,
+            pb.PBServerFactory(jpb_root),
+            interface=smpp_client_conf.bind
+        )
 
-        # AMQP Broker is used to listen to submit_sm queues and publish to deliver_sm/dlr queues
+        # AMQP and Redis integration
         self.components['smppcm-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
         self.components['smppcm-pb-factory'].addRedisClient(self.components['rc'])
         self.components['smppcm-pb-factory'].addRouterPB(self.components['router-pb-factory'])
 
-        # Add interceptor if enabled:
+        # Interceptor if enabled
         if 'interceptor-pb-client' in self.components:
             self.components['smppcm-pb-factory'].addInterceptorPBClient(
-                self.components['interceptor-pb-client'])
+                self.components['interceptor-pb-client']
+            )
 
     def stopSMPPClientManagerPBService(self):
-        """Stop SMPP Client Manager PB server"""
+        """Stop SMPP Client Manager PB server."""
         return self.components['smppcm-pb-server'].stopListening()
 
     @defer.inlineCallbacks
     def startDLRLookupService(self):
-        """Start DLRLookup"""
-
-        DLRLookupConfigInstance = DLRLookupConfig(self.options['config'])
-        self.components['dlrlookup'] = DLRLookup(DLRLookupConfigInstance, self.components['amqp-broker-factory'],
-                                                 self.components['rc'])
+        """Start DLRLookup service."""
+        dlr_conf = DLRLookupConfig(self.options['config'])
+        self.components['dlrlookup'] = DLRLookup(dlr_conf, self.components['amqp-broker-factory'], self.components['rc'])
         yield self.components['dlrlookup'].subscribe()
 
     def startSMPPServerPBService(self):
-        """Start SMPP Server PB server"""
+        """Start SMPP Server PB server."""
+        smpp_server_pb_conf = SMPPServerPBConfig(self.options['config'])
+        self.components['smpps-pb-factory'] = SMPPServerPB(smpp_server_pb_conf)
 
-        SMPPServerPBConfigInstance = SMPPServerPBConfig(self.options['config'])
-        self.components['smpps-pb-factory'] = SMPPServerPB(SMPPServerPBConfigInstance)
-
-        # Set authentication portal
         p = portal.Portal(JasminPBRealm(self.components['smpps-pb-factory']))
-        if SMPPServerPBConfigInstance.authentication:
+        if smpp_server_pb_conf.authentication:
             c = InMemoryUsernamePasswordDatabaseDontUse()
-            c.addUser(SMPPServerPBConfigInstance.admin_username, SMPPServerPBConfigInstance.admin_password)
+            c.addUser(smpp_server_pb_conf.admin_username, smpp_server_pb_conf.admin_password)
             p.registerChecker(c)
         else:
             p.registerChecker(AllowAnonymousAccess())
-        jPBPortalRoot = JasminPBPortalRoot(p)
+        jpb_root = JasminPBPortalRoot(p)
 
-        # Add service
         self.components['smpps-pb-server'] = reactor.listenTCP(
-            SMPPServerPBConfigInstance.port,
-            pb.PBServerFactory(jPBPortalRoot),
-            interface=SMPPServerPBConfigInstance.bind)
+            smpp_server_pb_conf.port,
+            pb.PBServerFactory(jpb_root),
+            interface=smpp_server_pb_conf.bind
+        )
 
     def stopSMPPServerPBService(self):
-        """Stop SMPP Server PB"""
+        """Stop SMPP Server PB."""
         return self.components['smpps-pb-server'].stopListening()
 
     def startSMPPServerService(self):
-        """Start SMPP Server"""
+        """Start SMPP Server."""
+        smpp_server_conf = SMPPServerConfig(self.options['config'])
 
-        SMPPServerConfigInstance = SMPPServerConfig(self.options['config'])
-
-        # Set authentication portal
+        # SMPP auth portal
         p = portal.Portal(
-            SmppsRealm(
-                SMPPServerConfigInstance.id,
-                self.components['router-pb-factory']))
+            SmppsRealm(smpp_server_conf.id, self.components['router-pb-factory'])
+        )
         p.registerChecker(RouterAuthChecker(self.components['router-pb-factory']))
 
-        # SMPPServerFactory init
         self.components['smpp-server-factory'] = SMPPServerFactory(
-            SMPPServerConfigInstance,
+            smpp_server_conf,
             auth_portal=p,
             RouterPB=self.components['router-pb-factory'],
-            SMPPClientManagerPB=self.components['smppcm-pb-factory'])
+            SMPPClientManagerPB=self.components['smppcm-pb-factory']
+        )
 
-        # Start server
         self.components['smpp-server'] = reactor.listenTCP(
-            SMPPServerConfigInstance.port,
+            smpp_server_conf.port,
             self.components['smpp-server-factory'],
-            interface=SMPPServerConfigInstance.bind)
+            interface=smpp_server_conf.bind
+        )
 
-        # Add interceptor if enabled:
+        # Interceptor if enabled
         if 'interceptor-pb-client' in self.components:
             self.components['smpp-server-factory'].addInterceptorPBClient(
-                self.components['interceptor-pb-client'])
+                self.components['interceptor-pb-client']
+            )
 
     def stopSMPPServerService(self):
-        """Stop SMPP Server"""
+        """Stop SMPP Server."""
         return self.components['smpp-server'].stopListening()
 
     def startdeliverSmThrowerService(self):
-        """Start deliverSmThrower"""
-
-        deliverThrowerConfigInstance = deliverSmThrowerConfig(self.options['config'])
-        self.components['deliversm-thrower'] = deliverSmThrower(deliverThrowerConfigInstance)
+        """Start deliverSmThrower."""
+        deliver_conf = deliverSmThrowerConfig(self.options['config'])
+        self.components['deliversm-thrower'] = deliverSmThrower(deliver_conf)
         self.components['deliversm-thrower'].addSmpps(self.components['smpp-server-factory'])
 
-        # AMQP Broker is used to listen to deliver_sm queue
+        # AMQP Broker integration
         return self.components['deliversm-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopdeliverSmThrowerService(self):
-        """Stop deliverSmThrower"""
+        """Stop deliverSmThrower."""
         return self.components['deliversm-thrower'].stopService()
 
     def startDLRThrowerService(self):
-        """Start DLRThrower"""
-
-        DLRThrowerConfigInstance = DLRThrowerConfig(self.options['config'])
-        self.components['dlr-thrower'] = DLRThrower(DLRThrowerConfigInstance)
+        """Start DLRThrower."""
+        dlr_thrower_conf = DLRThrowerConfig(self.options['config'])
+        self.components['dlr-thrower'] = DLRThrower(dlr_thrower_conf)
         self.components['dlr-thrower'].addSmpps(self.components['smpp-server-factory'])
 
-        # AMQP Broker is used to listen to DLRThrower queue
+        # AMQP Broker integration
         return self.components['dlr-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopDLRThrowerService(self):
-        """Stop DLRThrower"""
+        """Stop DLRThrower."""
         return self.components['dlr-thrower'].stopService()
 
     def startHTTPApiService(self):
-        """Start HTTP Api"""
+        """Start HTTP API."""
+        http_conf = HTTPApiConfig(self.options['config'])
 
-        httpApiConfigInstance = HTTPApiConfig(self.options['config'])
-
-        # Add interceptor if enabled:
-        if 'interceptor-pb-client' in self.components:
-            interceptorpb_client = self.components['interceptor-pb-client']
-        else:
-            interceptorpb_client = None
+        interceptorpb_client = self.components.get('interceptor-pb-client', None)
 
         self.components['http-api-factory'] = HTTPApi(
             self.components['router-pb-factory'],
             self.components['smppcm-pb-factory'],
-            httpApiConfigInstance,
-            interceptorpb_client)
+            http_conf,
+            interceptorpb_client
+        )
 
         self.components['http-api-server'] = reactor.listenTCP(
-            httpApiConfigInstance.port,
-            server.Site(self.components['http-api-factory'], logPath=httpApiConfigInstance.access_log),
-            interface=httpApiConfigInstance.bind)
+            http_conf.port,
+            server.Site(self.components['http-api-factory'], logPath=http_conf.access_log),
+            interface=http_conf.bind
+        )
 
     def stopHTTPApiService(self):
-        """Stop HTTP Api"""
+        """Stop HTTP API."""
         return self.components['http-api-server'].stopListening()
 
     def startJCliService(self):
-        """Start jCli console server"""
+        """Start jCli console server."""
         loadConfigProfileWithCreds = {
             'username': self.options['username'],
-            'password': self.options['password']}
-        JCliConfigInstance = JCliConfig(self.options['config'])
-        JCli_f = JCliFactory(
-            JCliConfigInstance,
+            'password': self.options['password']
+        }
+        jcli_conf = JCliConfig(self.options['config'])
+        jcli_factory = JCliFactory(
+            jcli_conf,
             self.components['smppcm-pb-factory'],
             self.components['router-pb-factory'],
             self.components['smpp-server-factory'],
-            loadConfigProfileWithCreds)
+            loadConfigProfileWithCreds
+        )
 
         self.components['jcli-server'] = reactor.listenTCP(
-            JCliConfigInstance.port,
-            JCli_f,
-            interface=JCliConfigInstance.bind)
+            jcli_conf.port,
+            jcli_factory,
+            interface=jcli_conf.bind
+        )
 
     def stopJCliService(self):
-        """Stop jCli console server"""
+        """Stop jCli console server."""
         return self.components['jcli-server'].stopListening()
 
     def startInterceptorPBClient(self):
-        """Start Interceptor client"""
-
-        InterceptorPBClientConfigInstance = InterceptorPBClientConfig(self.options['config'])
+        """Start Interceptor client."""
+        interceptor_conf = InterceptorPBClientConfig(self.options['config'])
         self.components['interceptor-pb-client'] = InterceptorPBProxy()
-
         return self.components['interceptor-pb-client'].connect(
-            InterceptorPBClientConfigInstance.host,
-            InterceptorPBClientConfigInstance.port,
-            InterceptorPBClientConfigInstance.username,
-            InterceptorPBClientConfigInstance.password,
-            retry=True)
+            interceptor_conf.host,
+            interceptor_conf.port,
+            interceptor_conf.username,
+            interceptor_conf.password,
+            retry=True
+        )
 
     def stopInterceptorPBClient(self):
-        """Stop Interceptor client"""
-
+        """Stop Interceptor client."""
         if self.components['interceptor-pb-client'].isConnected:
             return self.components['interceptor-pb-client'].disconnect()
 
     @defer.inlineCallbacks
     def start(self):
-        """Start Jasmind daemon"""
+        """Start Jasmin Daemon main services."""
         self.log.info("Starting Jasmin Daemon ...")
 
-        # Requirements check begin:
-        ########################################################
+        # Optional interceptor client
         if self.options['enable-interceptor-client']:
             try:
-                # [optional] Start Interceptor client
                 yield self.startInterceptorPBClient()
             except Exception as e:
-                self.log.error("  Cannot connect to interceptor: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot connect to interceptor: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  Interceptor client Started.")
-        # Requirements check end.
+                self.log.info("Interceptor client Started.")
 
-        ########################################################
-        # Connect to redis server
+        # Redis client
         try:
             yield self.startRedisClient()
         except Exception as e:
-            self.log.error("  Cannot start RedisClient: %s\n%s" % (e, traceback.format_exc()))
+            self.log.error(f"Cannot start RedisClient: {e}\n{traceback.format_exc()}")
         else:
-            self.log.info("  RedisClient Started.")
+            self.log.info("RedisClient Started.")
 
-        ########################################################
-        # Start AMQP Broker
+        # AMQP Broker
         try:
             yield self.startAMQPBrokerService()
             yield self.components['amqp-broker-factory'].getChannelReadyDeferred()
         except Exception as e:
-            self.log.error("  Cannot start AMQP Broker: %s\n%s" % (e, traceback.format_exc()))
+            self.log.error(f"Cannot start AMQP Broker: {e}\n{traceback.format_exc()}")
         else:
-            self.log.info("  AMQP Broker Started.")
+            self.log.info("AMQP Broker Started.")
 
-        ########################################################
-        # Start Router PB server
+        # RouterPB
         try:
             yield self.startRouterPBService()
         except Exception as e:
-            self.log.error("  Cannot start RouterPB: %s\n%s" % (e, traceback.format_exc()))
+            self.log.error(f"Cannot start RouterPB: {e}\n{traceback.format_exc()}")
         else:
-            self.log.info("  RouterPB Started.")
+            self.log.info("RouterPB Started.")
 
-        ########################################################
-        # Start SMPP Client connector manager and add rc
+        # SMPPClientManagerPB
         try:
             self.startSMPPClientManagerPBService()
         except Exception as e:
-            self.log.error("  Cannot start SMPPClientManagerPB: %s\n%s" % (e, traceback.format_exc()))
+            self.log.error(f"Cannot start SMPPClientManagerPB: {e}\n{traceback.format_exc()}")
         else:
-            self.log.info("  SMPPClientManagerPB Started.")
+            self.log.info("SMPPClientManagerPB Started.")
 
-        ########################################################
+        # DLR Lookup
         if self.options['enable-dlr-lookup']:
             try:
-                # [optional] Start DLR Lookup
                 self.startDLRLookupService()
             except Exception as e:
-                self.log.error("  Cannot start DLRLookup: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start DLRLookup: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  DLRLookup Started.")
+                self.log.info("DLRLookup Started.")
 
-        ########################################################
+        # SMPP Server
         if not self.options['disable-smpp-server']:
             try:
-                # [optional] Start SMPP Server
                 self.startSMPPServerService()
             except Exception as e:
-                self.log.error("  Cannot start SMPPServer: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start SMPPServer: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  SMPPServer Started.")
+                self.log.info("SMPPServer Started.")
 
             try:
-                # [optional] Start SMPP Server PB
                 self.startSMPPServerPBService()
                 self.components['smpps-pb-factory'].addSmpps(self.components['smpp-server-factory'])
             except Exception as e:
-                self.log.error("  Cannot start SMPPServerPB: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start SMPPServerPB: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  SMPPServer Started.")
+                self.log.info("SMPPServerPB Started.")
 
-        ########################################################
+        # deliverSmThrower
         if not self.options['disable-deliver-thrower']:
             try:
-                # [optional] Start deliverSmThrower
                 yield self.startdeliverSmThrowerService()
             except Exception as e:
-                self.log.error("  Cannot start deliverSmThrower: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start deliverSmThrower: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  deliverSmThrower Started.")
+                self.log.info("deliverSmThrower Started.")
 
-        ########################################################
+        # DLRThrower
         if self.options['enable-dlr-thrower']:
             try:
-                # [optional] Start DLRThrower
                 yield self.startDLRThrowerService()
             except Exception as e:
-                self.log.error("  Cannot start DLRThrower: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start DLRThrower: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  DLRThrower Started.")
+                self.log.info("DLRThrower Started.")
 
-        ########################################################
+        # HTTPApi
         if not self.options['disable-http-api']:
             try:
-                # [optional] Start HTTP Api
                 self.startHTTPApiService()
             except Exception as e:
-                self.log.error("  Cannot start HTTPApi: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start HTTPApi: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  HTTPApi Started.")
+                self.log.info("HTTPApi Started.")
 
-        ########################################################
+        # jCli
         if not self.options['disable-jcli']:
             try:
-                # [optional] Start JCli server
                 self.startJCliService()
             except Exception as e:
-                self.log.error("  Cannot start jCli: %s\n%s" % (e, traceback.format_exc()))
+                self.log.error(f"Cannot start jCli: {e}\n{traceback.format_exc()}")
             else:
-                self.log.info("  jCli Started.")
+                self.log.info("jCli Started.")
 
     @defer.inlineCallbacks
     def stop(self):
-        """Stop Jasmind daemon"""
+        """Stop Jasmin Daemon cleanly."""
         self.log.info("Stopping Jasmin Daemon ...")
 
         if 'jcli-server' in self.components:
             yield self.stopJCliService()
-            self.log.info("  jCli stopped.")
+            self.log.info("jCli stopped.")
 
         if 'http-api-server' in self.components:
             yield self.stopHTTPApiService()
-            self.log.info("  HTTPApi stopped.")
+            self.log.info("HTTPApi stopped.")
 
         if 'dlr-thrower' in self.components:
             yield self.stopDLRThrowerService()
-            self.log.info("  DLRThrower stopped.")
+            self.log.info("DLRThrower stopped.")
 
         if 'deliversm-thrower' in self.components:
             yield self.stopdeliverSmThrowerService()
-            self.log.info("  deliverSmThrower stopped.")
+            self.log.info("deliverSmThrower stopped.")
 
         if 'smpps-pb-server' in self.components:
             yield self.stopSMPPServerPBService()
-            self.log.info("  SMPPServerPB stopped.")
+            self.log.info("SMPPServerPB stopped.")
 
         if 'smpp-server' in self.components:
             yield self.stopSMPPServerService()
-            self.log.info("  SMPPServer stopped.")
+            self.log.info("SMPPServer stopped.")
 
         if 'smppcm-pb-server' in self.components:
             yield self.stopSMPPClientManagerPBService()
-            self.log.info("  SMPPClientManagerPB stopped.")
+            self.log.info("SMPPClientManagerPB stopped.")
 
         if 'router-pb-server' in self.components:
             yield self.stopRouterPBService()
-            self.log.info("  RouterPB stopped.")
+            self.log.info("RouterPB stopped.")
 
         if 'amqp-broker-client' in self.components:
             yield self.stopAMQPBrokerService()
-            self.log.info("  AMQP Broker disconnected.")
+            self.log.info("AMQP Broker disconnected.")
 
         if 'rc' in self.components:
             yield self.stopRedisClient()
-            self.log.info("  RedisClient stopped.")
+            self.log.info("RedisClient stopped.")
 
-        # Shutdown requirements:
         if 'interceptor-pb-client' in self.components:
             yield self.stopInterceptorPBClient()
-            self.log.info("  Interceptor client stopped.")
+            self.log.info("Interceptor client stopped.")
 
         reactor.stop()
 
-    def sighandler_stop(self, signum, frame):
-        """Handle stop signal cleanly"""
+    def sighandler_stop(self, signum: int, frame: Optional[object]):
+        """Handle system signals to stop Jasmin Daemon cleanly."""
         self.log.info("Received signal to stop Jasmin Daemon")
-
         return self.stop()
 
 
@@ -529,10 +497,7 @@ if __name__ == '__main__':
         options = Options()
         options.parseOptions()
 
-        # Must not be executed simultaneously (c.f. #265)
         lock = FileLock("/tmp/jasmind")
-
-        # Ensure there are no paralell runs of this script
         lock.acquire(timeout=2)
 
         # Prepare to start
@@ -540,18 +505,21 @@ if __name__ == '__main__':
         # Setup signal handlers
         signal.signal(signal.SIGINT, ja_d.sighandler_stop)
         signal.signal(signal.SIGTERM, ja_d.sighandler_stop)
-        # Start JasminDaemon
-        ja_d.start()
 
+        ja_d.start()
         reactor.run()
+
     except usage.UsageError as errortext:
-        print('%s: %s' % (sys.argv[0], errortext))
-        print('%s: Try --help for usage details.' % (sys.argv[0]))
+        print(f"{sys.argv[0]}: {errortext}")
+        print(f"{sys.argv[0]}: Try --help for usage details.")
+        sys.exit(1)
     except LockTimeout:
-        print("Lock not acquired ! exiting")
+        print("Could not acquire lock within timeout, exiting.")
+        sys.exit(1)
     except AlreadyLocked:
-        print("There's another instance on jasmind running, exiting.")
+        print("Another instance of jasmind is already running, exiting.")
+        sys.exit(1)
     finally:
-        # Release the lock
+        # Release the lock if held
         if lock is not None and lock.i_am_locking():
             lock.release()
