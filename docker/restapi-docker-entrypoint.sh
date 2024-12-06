@@ -45,7 +45,7 @@ if [ "$RESTAPI_MODE" = "1" ]; then
   echo 'Starting Jasmin REST API using Gunicorn'
   gunicorn -b 0.0.0.0:8080 jasmin.protocols.rest:api \
     --access-logfile /var/log/jasmin/rest-api.access.log \
-    --disable-redirect-access-to-syslog
+    --disable-redirect-access-to-syslog &
 else
   # Update publish_submit_sm_resp setting
   if [ "$ENABLE_PUBLISH_SUBMIT_SM_RESP" = "1" ]; then
