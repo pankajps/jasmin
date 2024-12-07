@@ -111,7 +111,7 @@ services:
 
   jasmin-api:
     build:
-      context: ./jasmin-api
+      context: ../jasmin-api
       dockerfile: Dockerfile
     image: jasmin-api:latest
     restart: unless-stopped

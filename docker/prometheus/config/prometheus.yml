@@ -14,7 +14,7 @@ scrape_configs:
       - targets: ['jasmin:1401']
   - job_name: 'rabbitmq'
     static_configs:
-      - targets: [ 'rabbitmq:15672' ]
+      - targets: [ 'rabbit-mq:15692' ]
   - job_name: 'redis'
     static_configs:
       - targets: [ 'redis:6379' ]
