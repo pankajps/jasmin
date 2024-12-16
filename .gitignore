@@ -59,4 +59,4 @@ celerybeat-schedule.db
 
 .env
 
-jasmin-api
+*.log
