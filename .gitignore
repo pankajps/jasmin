@@ -60,3 +60,4 @@ celerybeat-schedule.db
 .env
 
 *.log
+*.log.*
