@@ -109,46 +109,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  jasmin-api:
-    build:
-      context: ../jasmin-api
-      dockerfile: Dockerfile
-    image: jasmin-api:latest
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    networks:
-      - jasmin
-    depends_on:
-      - jasmin
-    environment:
-      # Set environment variables as needed
-      DEBUG: "${DEBUG:-False}"
-      TELNET_HOST: "${TELNET_HOST:-jasmin}"
-      TELNET_PORT: "${TELNET_PORT:-8990}"
-      TELNET_USERNAME: "${TELNET_USERNAME:-jcliadmin}"
-      TELNET_PW: "${TELNET_PW:-jclipwd}"
-      TELNET_TIMEOUT: "${TELNET_TIMEOUT:-10}"
-      JASMIN_K8S: "${JASMIN_K8S:-False}"
-      JASMIN_K8S_NAMESPACE: "${JASMIN_K8S_NAMESPACE:-default}"
-      JASMIN_DOCKER: "${JASMIN_DOCKER:-True}"
-      JASMIN_DOCKER_PORTS: "${JASMIN_DOCKER_PORTS:-[8990]}"
-    security_opt:
-      - no-new-privileges:true
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-        reservations:
-          cpus: '0.2'
-          memory: 128M
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   prometheus:
     image: prom/prometheus:v3.0.1
     restart: unless-stopped
@@ -232,6 +192,7 @@ services:
 networks:
   jasmin:
     driver: bridge
+    name: jasmin
 
 volumes:
   jasmin_config:
