@@ -19,15 +19,14 @@ from smpp.pdu.error import SMPPClientError
 from smpp.pdu.pdu_types import CommandId, CommandStatus, PDURequest
 
 from jasmin.protocols.smpp.error import (
-    SubmitSmInvalidArgsError, SubmitSmWithoutDestinationAddrError, 
+    SubmitSmInvalidArgsError, SubmitSmWithoutDestinationAddrError,
     InterceptorRunError, SubmitSmInterceptionError, SubmitSmInterceptionSuccess,
     SubmitSmThroughputExceededError, SubmitSmRoutingError, SubmitSmRouteNotFoundError,
-    SubmitSmChargingError)
+    SubmitSmChargingError, InterceptorNotSetError, InterceptorNotConnectedError
+)
 from jasmin.protocols.smpp.protocol import SMPPClientProtocol, SMPPServerProtocol
 from jasmin.protocols.smpp.stats import SMPPClientStatsCollector, SMPPServerStatsCollector
 from jasmin.protocols.smpp.validation import SmppsCredentialValidator
-
-from jasmin.protocols.smpp.error import InterceptorNotSetError, InterceptorNotConnectedError
 
 LOG_CATEGORY_CLIENT_BASE = "smpp.client"
 LOG_CATEGORY_SERVER_BASE = "smpp.server"
@@ -35,12 +34,23 @@ LOG_CATEGORY_SERVER_BASE = "smpp.server"
 
 class SmppClientIsNotConnected(Exception):
     """
-    An exception that is raised when a trying to use smpp object when
-    it is still None (before callbacking bind())
+    Raised when attempting to use the smpp object before it is fully connected (i.e., smpp is still None).
     """
 
 
 class SMPPClientFactory(ClientFactory):
+    """
+    Factory for creating SMPP client protocol instances and handling reconnection logic.
+
+    Attributes:
+        config: SMPPClientConfig instance with connection and binding options.
+        msgHandler: Callable for handling inbound messages from the SMSC.
+        stats: SMPPClientStatsCollector instance for metrics.
+        smpp: SMPPClientProtocol instance once connected and bound.
+        connectDeferred: Deferred for the connection stage.
+        exitDeferred: Deferred that fires upon disconnection without reconnection.
+        connectionRetry: Boolean flag indicating whether to attempt reconnection.
+    """
     protocol = SMPPClientProtocol
 
     def __init__(self, config, msgHandler=None):
@@ -54,99 +64,90 @@ class SMPPClientFactory(ClientFactory):
         self.stats.set('created_at', datetime.now())
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY_CLIENT_BASE + ".%s" % config.id)
+        self.log = logging.getLogger(f"{LOG_CATEGORY_CLIENT_BASE}.{config.id}")
         if len(self.log.handlers) != 1:
             self.log.setLevel(self.config.log_level)
-            _when = self.config.log_rotate if hasattr(self.config, 'log_rotate') else 'midnight'
+            rotate_when = getattr(self.config, 'log_rotate', 'midnight')
             if 'stdout' in self.config.log_file:
                 handler = logging.StreamHandler(sys.stdout)
             else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file, when=_when)
+                handler = TimedRotatingFileHandler(filename=self.config.log_file, when=rotate_when)
             formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
             handler.setFormatter(formatter)
             self.log.addHandler(handler)
             self.log.propagate = False
 
-        if msgHandler is None:
-            self.msgHandler = self.msgHandlerStub
-        else:
-            self.msgHandler = msgHandler
+        self.msgHandler = msgHandler if msgHandler is not None else self.msgHandlerStub
 
     def buildProtocol(self, addr):
-        """Provision protocol
-        """
-        proto = ClientFactory.buildProtocol(self, addr)
-
-        # Setup logger
+        proto = super().buildProtocol(addr)
         proto.log = self.log
-
         return proto
 
     def getConfig(self):
         return self.config
 
     def msgHandlerStub(self, smpp, pdu):
-        self.log.warning("msgHandlerStub: Received an unhandled message %s ...", pdu)
+        self.log.warning(f"msgHandlerStub: Received an unhandled message {pdu} ...")
 
     def startedConnecting(self, connector):
-        self.log.info("Connecting to %s ...", connector.getDestination())
+        self.log.info(f"Connecting to {connector.getDestination()} ...")
 
     def getExitDeferred(self):
-        """Get a Deferred so you can be notified on disconnect and exited
-        This deferred is called once disconnection occurs without a further
-        reconnection retrys
+        """
+        Returns a Deferred that fires once the client disconnects without retrying.
         """
         return self.exitDeferred
 
     def clientConnectionFailed(self, connector, reason):
-        """Connection failed
-        """
-        self.log.error("Connection failed. Reason: %s", str(reason))
+        self.log.error(f"Connection failed. Reason: {reason}")
 
         if self.config.reconnectOnConnectionFailure and self.connectionRetry:
-            self.log.info("Reconnecting after %d seconds ...",
-                          self.config.reconnectOnConnectionFailureDelay)
+            self.log.info(f"Reconnecting after {self.config.reconnectOnConnectionFailureDelay} seconds ...")
             self.reconnectTimer = reactor.callLater(
-                self.config.reconnectOnConnectionFailureDelay, self.reConnect, connector)
+                self.config.reconnectOnConnectionFailureDelay, self.reConnect, connector
+            )
         else:
             self.connectDeferred.errback(reason)
             self.exitDeferred.callback(None)
             self.log.info("Exiting.")
 
     def clientConnectionLost(self, connector, reason):
-        """Connection lost
-        """
-        self.log.error("Connection lost. Reason: %s", str(reason))
+        self.log.error(f"Connection lost. Reason: {reason}")
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
-            self.log.info("Reconnecting after %d seconds ...",
-                          self.config.reconnectOnConnectionLossDelay)
+            self.log.info(f"Reconnecting after {self.config.reconnectOnConnectionLossDelay} seconds ...")
             self.reconnectTimer = reactor.callLater(
-                self.config.reconnectOnConnectionLossDelay, self.reConnect, connector)
+                self.config.reconnectOnConnectionLossDelay, self.reConnect, connector
+            )
         else:
             self.exitDeferred.callback(None)
             self.log.info("Exiting.")
 
     def reConnect(self, connector=None):
+        """
+        Reestablishes the connection if disconnected.
+        """
         if connector is None:
-            self.log.error("No connector to retry !")
+            self.log.error("No connector available for reconnection!")
         else:
-            # Reset deferred if it were called before
-            if self.connectDeferred.called is True:
+            # Reset connectDeferred if it was previously fired
+            if self.connectDeferred.called:
                 self.connectDeferred = defer.Deferred()
                 self.connectDeferred.addCallback(self.bind)
-
-            # And try to connect again
             connector.connect()
 
     def _connect(self):
+        """
+        Initiate a TCP or SSL connection to the SMSC.
+        """
         self.connectionRetry = True
 
         if self.config.useSSL:
-            self.log.info('Establishing SSL connection to %s:%d', self.config.host, self.config.port)
+            self.log.info(f"Establishing SSL connection to {self.config.host}:{self.config.port}")
             reactor.connectSSL(self.config.host, self.config.port, self, CtxFactory(self.config))
         else:
-            self.log.info('Establishing TCP connection to %s:%d', self.config.host, self.config.port)
+            self.log.info(f"Establishing TCP connection to {self.config.host}:{self.config.port}")
             reactor.connectTCP(self.config.host, self.config.port, self)
 
         self.exitDeferred = defer.Deferred()
@@ -154,39 +155,45 @@ class SMPPClientFactory(ClientFactory):
         return self.connectDeferred
 
     def connectAndBind(self):
+        """
+        Connect to the SMSC and then initiate the bind process.
+        """
         self._connect()
         self.connectDeferred.addCallback(self.bind)
-
         return self.connectDeferred
 
     def disconnect(self):
+        """
+        Disconnect from the SMSC if connected.
+        """
         if self.smpp is not None:
             self.log.info('Disconnecting SMPP client')
             return self.smpp.unbindAndDisconnect()
-        else:
-            return None
+        return None
 
     def stopConnectionRetrying(self):
-        """This will stop the factory from reconnecting
-        It is used whenever a service stop has been requested, the connectionRetry flag
-        is reset to True upon connect() call
         """
-
+        Stop automatic reconnection attempts.
+        """
         self.log.info('Stopped automatic connection retrying.')
         if self.reconnectTimer and self.reconnectTimer.active():
             self.reconnectTimer.cancel()
             self.reconnectTimer = None
-
         self.connectionRetry = False
 
     def disconnectAndDontRetryToConnect(self):
+        """
+        Disconnect and prevent any further reconnection attempts.
+        """
         self.log.info('Ordering a disconnect with no further reconnections.')
         self.stopConnectionRetrying()
         return self.disconnect()
 
     def bind(self, smpp):
+        """
+        Bind the SMPP session according to the specified bind operation.
+        """
         self.smpp = smpp
-
         if self.config.bindOperation == 'transceiver':
             return smpp.bindAsTransceiver()
         elif self.config.bindOperation == 'receiver':
@@ -194,7 +201,7 @@ class SMPPClientFactory(ClientFactory):
         elif self.config.bindOperation == 'transmitter':
             return smpp.bindAsTransmitter()
         else:
-            raise SMPPClientError("Invalid bind operation: %s" % self.config.bindOperation)
+            raise SMPPClientError(f"Invalid bind operation: {self.config.bindOperation}")
 
     def getSessionState(self):
         if self.smpp is None:
@@ -204,37 +211,45 @@ class SMPPClientFactory(ClientFactory):
 
 
 class CtxFactory(ssl.ClientContextFactory):
+    """
+    SSL context factory for establishing secure connections if required.
+    """
+
     def __init__(self, config):
         self.smppConfig = config
 
     def getContext(self):
         self.method = SSL.SSLv23_METHOD
-        ctx = ssl.ClientContextFactory.getContext(self)
+        ctx = super().getContext()
         if self.smppConfig.SSLCertificateFile:
             ctx.use_certificate_file(self.smppConfig.SSLCertificateFile)
         return ctx
 
 
 class SMPPServerFactory(_SMPPServerFactory):
+    """
+    Factory for SMPP Server protocols. Handles inbound bind requests, maintains
+    a map of bound connections, and routes submit_sm PDUs through RouterPB.
+    """
     protocol = SMPPServerProtocol
 
     def __init__(self, config, auth_portal, RouterPB=None, SMPPClientManagerPB=None,
                  interceptorpb_client=None):
         self.config = config
-        # A dict of protocol instances for each of the current connections,
-        # indexed by system_id
-        self.bound_connections = {}
         self._auth_portal = auth_portal
         self.RouterPB = RouterPB
         self.SMPPClientManagerPB = SMPPClientManagerPB
         self.interceptorpb_client = interceptorpb_client
 
+        # Dictionary of current connections indexed by system_id
+        self.bound_connections = {}
+
         # Setup statistics collector
         self.stats = SMPPServerStatsCollector().get(cid=self.config.id)
         self.stats.set('created_at', datetime.now())
 
-        # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY_SERVER_BASE + ".%s" % config.id)
+        # Set up logger
+        self.log = logging.getLogger(f"{LOG_CATEGORY_SERVER_BASE}.{config.id}")
         if len(self.log.handlers) != 1:
             self.log.setLevel(config.log_level)
             if 'stdout' in self.config.log_file:
@@ -246,91 +261,77 @@ class SMPPServerFactory(_SMPPServerFactory):
             self.log.addHandler(handler)
             self.log.propagate = False
 
+        # Use submit_sm_event_interceptor by default
         self.msgHandler = self.submit_sm_event_interceptor
 
     def addInterceptorPBClient(self, interceptorpb_client):
         self.interceptorpb_client = interceptorpb_client
-
         self.log.info('Added Interceptor to SMPPServerFactory')
 
     def submit_sm_event_interceptor(self, system_id, *args):
-        """Intercept submit_sm before handing it to self.submit_sm_event
         """
-
-        self.log.debug('Intercepting submit_sm event for system_id: %s', system_id)
+        Intercept submit_sm before calling submit_sm_event.
+        Validates arguments, checks destination address, user credentials, applies defaults,
+        and optionally runs interception scripts before routing.
+        """
+        self.log.debug(f'Intercepting submit_sm event for system_id: {system_id}')
 
         # Args validation
         if len(args) != 2:
-            self.log.error('(submit_sm_event/%s) Invalid args: %s', system_id, args)
-            raise SubmitSmInvalidArgsError()
-        if not isinstance(args[1], PDURequest):
-            self.log.error(
-                '(submit_sm_event/%s) Received an unknown object when waiting for a PDURequest: %s',
-                system_id,
-                args[1])
-            raise SubmitSmInvalidArgsError()
-        if args[1].id != CommandId.submit_sm:
-            self.log.error('(submit_sm_event/%s) Received a non submit_sm command id: %s',
-                           system_id, args[1].id)
-            raise SubmitSmInvalidArgsError()
-        if not isinstance(args[0], SMPPServerProtocol):
-            self.log.error(
-                '(submit_sm_event/%s) Received an unknown object when waiting for a SMPPServerProtocol: %s',
-                system_id,
-                args[0])
+            self.log.error(f'(submit_sm_event/{system_id}) Invalid args: {args}')
             raise SubmitSmInvalidArgsError()
 
-        proto = args[0]
+        proto, SubmitSmPDU = args
+        if not isinstance(SubmitSmPDU, PDURequest) or SubmitSmPDU.id != CommandId.submit_sm:
+            self.log.error(f'(submit_sm_event/{system_id}) Expected submit_sm PDU, got: {SubmitSmPDU}')
+            raise SubmitSmInvalidArgsError()
+
+        if not isinstance(proto, SMPPServerProtocol):
+            self.log.error(f'(submit_sm_event/{system_id}) Invalid protocol object: {proto}')
+            raise SubmitSmInvalidArgsError()
+
         user = proto.user
-        SubmitSmPDU = args[1]
-
-        # Update CnxStatus
         user.getCnxStatus().smpps['submit_sm_request_count'] += 1
 
-        # Basic validation
-        if len(SubmitSmPDU.params['destination_addr']) < 1 or SubmitSmPDU.params['destination_addr'] is None:
-            self.log.error('(submit_sm_event/%s) SubmitSmPDU have no defined destination_addr', system_id)
+        if not SubmitSmPDU.params['destination_addr']:
+            self.log.error(f'(submit_sm_event/{system_id}) destination_addr not defined in SubmitSmPDU')
             raise SubmitSmWithoutDestinationAddrError()
 
-        # Make Credential validation
-        v = SmppsCredentialValidator('Send', user, SubmitSmPDU)
-        v.validate()
+        # Credential validation
+        validator = SmppsCredentialValidator('Send', user, SubmitSmPDU)
+        validator.validate()
 
-        # Update SubmitSmPDU by default values from user MtMessagingCredential
-        SubmitSmPDU = v.updatePDUWithUserDefaults(SubmitSmPDU)
-        
-        # Force same default values on subPDU while multipart
+        # Update PDU with user defaults
+        SubmitSmPDU = validator.updatePDUWithUserDefaults(SubmitSmPDU)
+
+        # Also update chained PDUs (multipart)
         _pdu = SubmitSmPDU
         while hasattr(_pdu, 'nextPdu'):
-          _pdu = _pdu.nextPdu
-          _pdu = v.updatePDUWithUserDefaults(_pdu)
+            _pdu = _pdu.nextPdu
+            _pdu = validator.updatePDUWithUserDefaults(_pdu)
 
         if self.RouterPB is None:
-            self.log.error('(submit_sm_event_interceptor/%s) RouterPB not set: submit_sm will not be routed',
-                           system_id)
+            self.log.error(f'(submit_sm_event_interceptor/{system_id}) RouterPB not set: no routing')
             return
 
-        # Prepare for interception then routing
         routable = RoutableSubmitSm(SubmitSmPDU, user)
 
-        # Interception inline
-        # @TODO: make Interception in a thread, just like httpapi interception
+        # Interception
         interceptor = self.RouterPB.getMTInterceptionTable().getInterceptorFor(routable)
         if interceptor is not None:
-            self.log.debug("RouterPB selected %s interceptor for this SubmitSmPDU", interceptor)
+            self.log.debug(f"RouterPB selected {interceptor} interceptor for this SubmitSmPDU")
             if self.interceptorpb_client is None:
                 self.stats.inc('interceptor_error_count')
-                self.log.error("InterceptorPB not set !")
-                raise InterceptorNotSetError('InterceptorPB not set !')
+                self.log.error("InterceptorPB not set!")
+                raise InterceptorNotSetError('InterceptorPB not set!')
             if not self.interceptorpb_client.isConnected:
                 self.stats.inc('interceptor_error_count')
-                self.log.error("InterceptorPB not connected !")
-                raise InterceptorNotConnectedError('InterceptorPB not connected !')
+                self.log.error("InterceptorPB not connected!")
+                raise InterceptorNotConnectedError('InterceptorPB not connected!')
 
             script = interceptor.getScript()
-            self.log.debug("Interceptor script loaded: %s", script)
+            self.log.debug(f"Interceptor script loaded: {script}")
 
-            # Run !
             d = self.interceptorpb_client.run_script(script, routable)
             d.addCallback(self.submit_sm_post_interception, system_id=system_id, proto=proto)
             d.addErrback(self.submit_sm_post_interception)
@@ -339,147 +340,129 @@ class SMPPServerFactory(_SMPPServerFactory):
             return self.submit_sm_post_interception(routable=routable, system_id=system_id, proto=proto)
 
     def submit_sm_post_interception(self, *args, **kw):
-        """This event handler will deliver the submit_sm to the right smppc connector.
-        Note that Jasmin deliver submit_sm messages like this:
-        - from httpapi to smppc (handled in jasmin.protocols.http.endpoints.send)
-        - from smpps to smppc (this event handler)
-
-        Note: This event handler MUST behave exactly like jasmin.protocols.http.endpoints.send.Send.render
         """
+        Handles submit_sm after interception. Routes the message via RouterPB and sends it
+        through SMPPClientManagerPB. Also handles billing, QoS, and logging.
+        """
+        message_id = None
+        status = None
 
         try:
-            # Init message id & status
-            message_id = None
-            status = None
-
-            # Post interception:
+            # Post-interception result handling
             if len(args) == 1:
-                if isinstance(args[0], bool) and not args[0]:
+                intercept_result = args[0]
+                if isinstance(intercept_result, bool) and not intercept_result:
                     self.stats.inc('interceptor_error_count')
-                    self.log.error('Failed running interception script, got a False return.')
-                    raise InterceptorRunError('Failed running interception script, check log for details')
-                elif isinstance(args[0], dict) and args[0]['smpp_status'] > 0:
+                    self.log.error('Interceptor returned False.')
+                    raise InterceptorRunError('Interception failed')
+                elif isinstance(intercept_result, dict) and intercept_result['smpp_status'] > 0:
                     self.stats.inc('interceptor_error_count')
-                    self.log.error('Interceptor script returned %s smpp_status error.', args[0]['smpp_status'])
-                    raise SubmitSmInterceptionError(code=args[0]['smpp_status'])
-                elif isinstance(args[0], dict) and args[0]['smpp_status'] == 0:
+                    self.log.error(f"Interceptor script returned error smpp_status {intercept_result['smpp_status']}")
+                    raise SubmitSmInterceptionError(code=intercept_result['smpp_status'])
+                elif isinstance(intercept_result, dict) and intercept_result['smpp_status'] == 0:
                     self.stats.inc('interceptor_count')
-                    self.log.info('Interceptor script returned %s success smpp_status.', args[0]['smpp_status'])
-                    # Do we have a message_id returned from interceptor ?
-                    if 'message_id' in args[0]['extra']:
-                        message_id = str(args[0]['extra']['message_id'])
+                    self.log.info(f'Interceptor script returned success smpp_status {intercept_result["smpp_status"]}')
+                    if 'message_id' in intercept_result['extra']:
+                        message_id = str(intercept_result['extra']['message_id'])
                     raise SubmitSmInterceptionSuccess()
-                elif isinstance(args[0], (str, bytes)):
+                elif isinstance(intercept_result, (str, bytes)):
                     self.stats.inc('interceptor_count')
-                    routable = pickle.loads(args[0])
+                    routable = pickle.loads(intercept_result)
                 else:
                     self.stats.inc('interceptor_error_count')
-                    self.log.error('Failed running interception script, got the following return: %s',
-                                   args[0])
-                    raise InterceptorRunError(
-                        'Failed running interception script, got the following return: %s' % args[0])
+                    self.log.error(f'Interceptor returned invalid data: {intercept_result}')
+                    raise InterceptorRunError(f'Invalid interceptor return: {intercept_result}')
             else:
                 routable = kw['routable']
 
             system_id = kw['system_id']
             proto = kw['proto']
 
-            self.log.debug('Handling submit_sm_post_interception event for system_id: %s', system_id)
+            self.log.debug(f'Handling submit_sm_post_interception for system_id: {system_id}')
 
-            # Get the route
+            # Route lookup
             route = self.RouterPB.getMTRoutingTable().getRouteFor(routable)
             if route is None:
-                self.log.error("No route matched from user %s for SubmitSmPDU: %s",
-                               routable.user, routable.pdu)
+                self.log.error("No route found for user %s and SubmitSmPDU: %s", routable.user, routable.pdu)
                 raise SubmitSmRouteNotFoundError()
 
-            # Get connector from selected route
-            self.log.debug("RouterPB selected %s route for this SubmitSmPDU", route)
+            # Connector selection
+            self.log.debug(f"Route {route} selected for SubmitSmPDU")
             routedConnector = route.getConnector()
-            # Is it a failover route ? then check for a bound connector, otherwise don't route
-            # The failover route requires at least one connector to be up, no message enqueuing will
-            # occur otherwise.
+
+            # Failover route logic
             if repr(route) == 'FailoverMTRoute':
-                self.log.debug('Selected route is a failover, will ensure connector is bound:')
+                self.log.debug('Failover route selected, ensuring connector is bound.')
                 while True:
                     c = self.SMPPClientManagerPB.perspective_connector_details(routedConnector.cid)
                     if c:
-                        self.log.debug('Connector [%s] is: %s', routedConnector.cid, c['session_state'])
+                        self.log.debug(f'Connector [{routedConnector.cid}] session_state: {c["session_state"]}')
                     else:
-                        self.log.debug('Connector [%s] is not found', routedConnector.cid)
+                        self.log.debug(f'Connector [{routedConnector.cid}] not found')
 
-                    if c and c['session_state'][:6] == 'BOUND_':
-                        # Choose this connector
+                    if c and c['session_state'].startswith('BOUND_'):
                         break
                     else:
-                        # Check next connector, None if no more connectors are available
                         routedConnector = route.getConnector()
                         if routedConnector is None:
                             break
 
             if routedConnector is None:
-                self.log.error("Failover route has no bound connector to handle SubmitSmPDU: %s",
-                               routable.pdu)
+                self.log.error("Failover route has no bound connector for SubmitSmPDU: %s", routable.pdu)
                 raise SubmitSmRoutingError()
 
             # QoS throttling
-            if (routable.user.mt_credential.getQuota('smpps_throughput') and routable.user.mt_credential.getQuota('smpps_throughput') >= 0
-                and routable.user.getCnxStatus().smpps['qos_last_submit_sm_at'] != 0):
+            if (routable.user.mt_credential.getQuota('smpps_throughput') is not None and
+                    routable.user.mt_credential.getQuota('smpps_throughput') >= 0 and
+                    routable.user.getCnxStatus().smpps['qos_last_submit_sm_at'] != 0):
                 qos_throughput_second = 1 / float(routable.user.mt_credential.getQuota('smpps_throughput'))
-                qos_throughput_ysecond_td = timedelta(microseconds=qos_throughput_second * 1000000)
+                qos_throughput_td = timedelta(microseconds=qos_throughput_second * 1000000)
                 qos_delay = datetime.now() - routable.user.getCnxStatus().smpps['qos_last_submit_sm_at']
-                if qos_delay < qos_throughput_ysecond_td:
+                if qos_delay < qos_throughput_td:
                     self.log.error(
-                        "QoS: submit_sm_event is faster (%s) than fixed throughput (%s) for user (%s), rejecting message.",
-                        qos_delay,
-                        qos_throughput_ysecond_td,
-                        routable.user)
-
+                        "QoS exceeded for user (%s): current delay %s vs required %s, rejecting message.",
+                        routable.user, qos_delay, qos_throughput_td)
                     raise SubmitSmThroughputExceededError()
+
             routable.user.getCnxStatus().smpps['qos_last_submit_sm_at'] = datetime.now()
 
-            # Pre-sending submit_sm: Billing processing
+            # Billing
             if self.config.billing_feature:
                 bill = route.getBillFor(routable.user)
-                self.log.debug("SubmitSmBill [bid:%s] [ttlamounts:%s] generated for this SubmitSmPDU",
-                               bill.bid, bill.getTotalAmounts())
+                self.log.debug(
+                    f"SubmitSmBill [bid:{bill.bid}] [total:{bill.getTotalAmounts()}] for this SubmitSmPDU")
                 charging_requirements = []
                 u_balance = routable.user.mt_credential.getQuota('balance')
                 u_subsm_count = routable.user.mt_credential.getQuota('submit_sm_count')
                 if u_balance is not None and bill.getTotalAmounts() > 0:
-                    # Ensure user have enough balance to pay submit_sm and submit_sm_resp
                     charging_requirements.append({
                         'condition': bill.getTotalAmounts() <= u_balance,
-                        'error_message': 'Not enough balance (%s) for charging: %s' % (
-                            u_balance, bill.getTotalAmounts())})
+                        'error_message': f'Insufficient balance ({u_balance}) for cost {bill.getTotalAmounts()}'
+                    })
                 if u_subsm_count is not None:
-                    # Ensure user have enough submit_sm_count to cover the bill action (decrement_submit_sm_count)
                     charging_requirements.append({
                         'condition': bill.getAction('decrement_submit_sm_count') <= u_subsm_count,
-                        'error_message': 'Not enough submit_sm_count (%s) for charging: %s' % (
-                            u_subsm_count, bill.getAction('decrement_submit_sm_count'))})
+                        'error_message': f'Insufficient submit_sm_count ({u_subsm_count}) for cost {bill.getAction("decrement_submit_sm_count")}'
+                    })
 
                 if self.RouterPB.chargeUserForSubmitSms(routable.user, bill, requirements=charging_requirements) is None:
-                    self.log.error('Charging user %s failed, [bid:%s] [ttlamounts:%s] (check router log)',
-                                   routable.user, bill.bid, bill.getTotalAmounts())
+                    self.log.error(
+                        f'Charging user {routable.user} failed [bid:{bill.bid}, total:{bill.getTotalAmounts()}]')
                     raise SubmitSmChargingError()
             else:
                 bill = None
 
-            # Get priority value from SubmitSmPDU to pass to SMPPClientManagerPB.perspective_submit_sm()
+            # Priority from SubmitSmPDU
             priority = 0
             if routable.pdu.params['priority_flag'] is not None:
                 priority = routable.pdu.params['priority_flag']._value_
 
             if self.SMPPClientManagerPB is None:
-                self.log.error(
-                    '(submit_sm_event/%s) SMPPClientManagerPB not set: submit_sm will not be submitted',
-                    system_id)
+                self.log.error(f'(submit_sm_event/{system_id}) SMPPClientManagerPB not set, no submission.')
                 return
 
-            ########################################################
-            # Send SubmitSmPDU through smpp client manager PB server
-            self.log.debug("Connector '%s' is set to be a route for this SubmitSmPDU", routedConnector.cid)
+            # Send SubmitSmPDU through SMPPClientManagerPB
+            self.log.debug(f"Selected connector '{routedConnector.cid}' for SubmitSmPDU")
             c = self.SMPPClientManagerPB.perspective_submit_sm(
                 uid=routable.user.uid,
                 cid=routedConnector.cid,
@@ -487,50 +470,42 @@ class SMPPServerFactory(_SMPPServerFactory):
                 submit_sm_bill=bill,
                 priority=priority,
                 pickled=False,
-                source_connector=proto)
+                source_connector=proto
+            )
 
-            if not hasattr(c, 'result'):
-                self.log.error('Failed to send SubmitSmPDU to [cid:%s], got: %s', routedConnector.cid, c)
+            if not hasattr(c, 'result') or not c.result:
+                self.log.error(f'Failed to send SubmitSmPDU to [cid:{routedConnector.cid}], got: {c}')
                 raise SubmitSmRoutingError()
 
-            # Build final response
-            if not c.result:
-                self.log.error('Failed to send SubmitSmPDU to [cid:%s]', routedConnector.cid)
-                raise SubmitSmRoutingError()
-
-            # Otherwise, message_id is defined on ESME_ROK
+            # message_id retrieved from ESME_ROK scenario
             message_id = c.result
+
         except (SubmitSmInterceptionError, SubmitSmInterceptionSuccess, InterceptorRunError,
                 SubmitSmRouteNotFoundError, SubmitSmThroughputExceededError, SubmitSmChargingError,
                 SubmitSmRoutingError) as e:
-            # Known exception handling
+            # Known exceptions have a defined status
             status = e.status
         except Exception as e:
-            # Unknown exception handling
-            self.log.critical('Got an unknown exception: %s', e)
+            # Unknown exception
+            self.log.critical(f'Unknown exception: {e}')
             status = CommandStatus.ESME_RUNKNOWNERR
         else:
-            self.log.debug('SubmitSmPDU sent to [cid:%s], result = %s', routedConnector.cid, message_id)
-
-            # Do not log text for privacy reasons
-            # Added in #691
+            # Successfully routed and submitted
             if self.config.log_privacy:
-                logged_content = '** %s byte content **' % len(routable.pdu.params['short_message'])
+                logged_content = f'** {len(routable.pdu.params["short_message"])} byte content **'
             else:
-                if isinstance(routable.pdu.params['short_message'], bytes):
-                    logged_content = '%r' % re.sub(rb'[^\x20-\x7E]+', b'.', routable.pdu.params['short_message'])
+                # Sanitize non-printable chars
+                content = routable.pdu.params['short_message']
+                if isinstance(content, bytes):
+                    logged_content = repr(re.sub(rb'[^\x20-\x7E]+', b'.', content))
                 else:
-                    logged_content = '%r' % re.sub(r'[^\x20-\x7E]+', '.', routable.pdu.params['short_message'])
+                    logged_content = repr(re.sub(r'[^\x20-\x7E]+', '.', content))
 
             self.log.info(
-                'SMS-MT [uid:%s] [cid:%s] [msgid:%s] [prio:%s] [from:%s] [to:%s] [content:%s]',
-                routable.user.uid,
-                routedConnector.cid,
-                message_id,
-                priority,
-                routable.pdu.params['source_addr'],
-                routable.pdu.params['destination_addr'],
-                logged_content)
+                f"SMS-MT [uid:{routable.user.uid}] [cid:{routedConnector.cid}] "
+                f"[msgid:{message_id}] [prio:{priority}] [from:{routable.pdu.params['source_addr']}] "
+                f"[to:{routable.pdu.params['destination_addr']}] [content:{logged_content}]"
+            )
             status = CommandStatus.ESME_ROK
         finally:
             if message_id is not None:
@@ -539,35 +514,27 @@ class SMPPServerFactory(_SMPPServerFactory):
                 return DataHandlerResponse(status=status)
 
     def buildProtocol(self, addr):
-        """Provision protocol with the dedicated logger
-        """
-        proto = _SMPPServerFactory.buildProtocol(self, addr)
-
-        # Setup logger
+        proto = super().buildProtocol(addr)
         proto.log = self.log
-
         return proto
 
     def addBoundConnection(self, connection, user):
         """
-        Overloading _SMPPServerFactory to remove dependency with config.systems
-        Jasmin removed systems from config as everything about credentials is
-        managed through User object
+        Overload to remove dependency on config.systems. Manages user-bound connections.
         """
         system_id = connection.system_id
-        self.log.debug('Adding SMPP binding for %s', system_id)
+        self.log.debug(f'Adding SMPP binding for {system_id}')
         if system_id not in self.bound_connections:
             self.bound_connections[system_id] = SMPPBindManager(user)
         self.bound_connections[system_id].addBinding(connection)
         bind_type = connection.bind_type
-        self.log.info("Added %s bind for '%s'. Active binds: %s.",
-                      bind_type, system_id, self.getBoundConnectionCountsStr(system_id))
+        self.log.info(
+            f"Added {bind_type} bind for '{system_id}'. Active binds: {self.getBoundConnectionCountsStr(system_id)}."
+        )
 
     def removeConnection(self, connection):
         """
-        Overloading _SMPPServerFactory to remove dependency with config.systems
-        Jasmin removed systems from config as everything about credentials is
-        managed through User object
+        Overload to remove dependency on config.systems. Removes bindings for a given connection.
         """
         if connection.system_id is None:
             self.log.debug("SMPP connection attempt failed without binding.")
@@ -575,44 +542,40 @@ class SMPPServerFactory(_SMPPServerFactory):
             system_id = connection.system_id
             bind_type = connection.bind_type
             self.bound_connections[system_id].removeBinding(connection)
-            self.log.info("Dropped %s bind for '%s'. Active binds: %s.",
-                          bind_type, system_id, self.getBoundConnectionCountsStr(system_id))
-            # If this is the last binding for this service then remove the BindManager
+            self.log.info(
+                f"Dropped {bind_type} bind for '{system_id}'. Active binds: {self.getBoundConnectionCountsStr(system_id)}."
+            )
+
             if self.bound_connections[system_id].getBindingCount() == 0:
                 self.bound_connections.pop(system_id)
 
     def canOpenNewConnection(self, user, bind_type):
         """
-        Overloading _SMPPServerFactory to remove dependency with config.systems
-        Jasmin removed systems from config as everything about credentials is
-        managed through User object
-        This method will check for authorization and quotas before allowing a new
-        connection
+        Checks if a new connection can be opened for a given user and bind_type.
         """
-        # Can bind ?
+        # Authorization
         if not user.smpps_credential.getAuthorization('bind'):
             self.log.warning(
-                'New bind rejected for username: "%s", reason: authorization failure.', user.username)
+                f'New bind rejected for username: "{user.username}", authorization failed.'
+            )
             return False
-        # Still didnt reach max_bindings ?
-        elif user.smpps_credential.getQuota('max_bindings') is not None:
-            bind_count = user.getCnxStatus().smpps['bound_connections_count']['bind_transmitter']
-            bind_count += user.getCnxStatus().smpps['bound_connections_count']['bind_receiver']
-            bind_count += user.getCnxStatus().smpps['bound_connections_count']['bind_transceiver']
-            if bind_count >= user.smpps_credential.getQuota('max_bindings'):
-                self.log.warning('New bind rejected for username: "%s", reason: max_bindings limit reached.',
-                                 user.username)
+        # Quotas
+        max_bindings = user.smpps_credential.getQuota('max_bindings')
+        if max_bindings is not None:
+            bind_count = (user.getCnxStatus().smpps['bound_connections_count']['bind_transmitter'] +
+                          user.getCnxStatus().smpps['bound_connections_count']['bind_receiver'] +
+                          user.getCnxStatus().smpps['bound_connections_count']['bind_transceiver'])
+            if bind_count >= max_bindings:
+                self.log.warning(
+                    f'New bind rejected for username: "{user.username}", max_bindings limit reached.'
+                )
                 return False
 
         return True
 
     def unbindAndRemoveGateway(self, user, ban=True):
         """
-        Overloading _SMPPServerFactory to remove dependency with config.systems
-        Jasmin removed systems from config as everything about credentials is
-        managed through User object.
-        It's also adding a 'ban' parameter to optionally remove binding authorization
-        for user.
+        Unbind and optionally ban a user from binding again.
         """
         if ban:
             user.smpps_credential.setAuthorization('bind', False)
@@ -622,23 +585,20 @@ class SMPPServerFactory(_SMPPServerFactory):
 
 
 class SMPPBindManager(_SMPPBindManager):
-    "Overloads _SMPPBindManager to add user tracking"
+    """
+    Overloaded SMPPBindManager to include user tracking and connection status updates.
+    """
 
     def __init__(self, user):
-        _SMPPBindManager.__init__(self, system_id=user.username)
-
+        super().__init__(system_id=user.username)
         self.user = user
 
     def addBinding(self, connection):
-        _SMPPBindManager.addBinding(self, connection)
-
-        # Update CnxStatus
+        super().addBinding(connection)
         self.user.getCnxStatus().smpps['bind_count'] += 1
         self.user.getCnxStatus().smpps['bound_connections_count'][connection.bind_type.name] += 1
 
     def removeBinding(self, connection):
-        _SMPPBindManager.removeBinding(self, connection)
-
-        # Update CnxStatus
+        super().removeBinding(connection)
         self.user.getCnxStatus().smpps['unbind_count'] += 1
         self.user.getCnxStatus().smpps['bound_connections_count'][connection.bind_type.name] -= 1

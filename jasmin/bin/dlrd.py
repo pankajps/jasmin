@@ -18,43 +18,51 @@ from jasmin.routing.throwers import DLRThrower
 from jasmin.config import ROOT_PATH
 from jasmin.bin import BaseDaemon
 
-CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
+CONFIG_PATH = os.getenv('CONFIG_PATH', f'{ROOT_PATH}/etc/jasmin/')
 
 
 class Options(usage.Options):
-    optParameters = [
-        ['config', 'c', '%s/dlr.cfg' % CONFIG_PATH,
-         'Jasmin dlrd configuration file'],
-        ['id', 'i', 'master',
-         'Daemon id, need to be different for each dlrd daemon'],
-    ]
+    """
+    Command-line options for the DlrDaemon.
 
-    optFlags = [
+    Options:
+    -c, --config: The path to the dlr.cfg configuration file.
+    -i, --id: Daemon identifier, used for lockfile naming.
+    """
+    optParameters = [
+        ['config', 'c', f'{CONFIG_PATH}/dlr.cfg', 'Jasmin dlrd configuration file'],
+        ['id', 'i', 'master', 'Daemon ID, must be unique per dlrd instance'],
     ]
 
 
 class DlrDaemon(BaseDaemon):
-    def startAMQPBrokerService(self):
-        """Start AMQP Broker"""
+    """
+    DlrDaemon manages the lifecycle of the DLR routing services, including:
+    - AMQP Broker connection
+    - SMPPServerPB client
+    - DLRThrower service
 
+    It sets up signal handlers and provides start/stop logic for each component.
+    """
+
+    def startAMQPBrokerService(self):
+        """Initialize and start the AMQP Broker service."""
         AMQPServiceConfigInstance = AmqpConfig(self.options['config'])
         self.components['amqp-broker-factory'] = AmqpFactory(AMQPServiceConfigInstance)
         self.components['amqp-broker-factory'].preConnect()
 
-        # Add service
         self.components['amqp-broker-client'] = reactor.connectTCP(
             AMQPServiceConfigInstance.host,
             AMQPServiceConfigInstance.port,
-            self.components['amqp-broker-factory'])
+            self.components['amqp-broker-factory']
+        )
 
     def stopAMQPBrokerService(self):
-        """Stop AMQP Broker"""
-
+        """Stop the AMQP Broker service."""
         return self.components['amqp-broker-client'].disconnect()
 
     def startSMPPServerPBClient(self):
-        """Start SMPPServerPB client"""
-
+        """Connect to the SMPPServerPB."""
         SMPPServerPBClientConfigInstance = SMPPServerPBClientConfig(self.options['config'])
         self.components['smpps-pb-client'] = SMPPServerPBProxy()
 
@@ -63,116 +71,114 @@ class DlrDaemon(BaseDaemon):
             SMPPServerPBClientConfigInstance.port,
             SMPPServerPBClientConfigInstance.username,
             SMPPServerPBClientConfigInstance.password,
-            retry=True)
+            retry=True
+        )
 
     def stopSMPPServerPBClient(self):
-        """Stop SMPPServerPB client"""
-
+        """Disconnect from the SMPPServerPB."""
         if self.components['smpps-pb-client'].isConnected:
             return self.components['smpps-pb-client'].disconnect()
 
     def startDLRThrowerService(self):
-        """Start DLRThrower"""
-
+        """Initialize and start the DLRThrower service."""
         DLRThrowerConfigInstance = DLRThrowerConfig(self.options['config'])
         self.components['dlr-thrower'] = DLRThrower(DLRThrowerConfigInstance)
         self.components['dlr-thrower'].addSmpps(self.components['smpps-pb-client'])
 
-        # AMQP Broker is used to listen to DLRThrower queue
+        # AMQP Broker is used to listen to the DLRThrower queue
         return self.components['dlr-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopDLRThrowerService(self):
-        """Stop DLRThrower"""
+        """Stop the DLRThrower service."""
         return self.components['dlr-thrower'].stopService()
 
     @defer.inlineCallbacks
     def start(self):
-        """Start Dlrd daemon"""
+        """Start DlrDaemon by initializing all services."""
         syslog.syslog(syslog.LOG_INFO, "Starting Dlr Daemon ...")
 
-        ########################################################
         # Start AMQP Broker
         try:
             self.startAMQPBrokerService()
             yield self.components['amqp-broker-factory'].getChannelReadyDeferred()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start AMQP Broker: %s" % e)
+            syslog.syslog(syslog.LOG_ERR, f"Cannot start AMQP Broker: {e}")
         else:
-            syslog.syslog(syslog.LOG_INFO, "  AMQP Broker Started.")
+            syslog.syslog(syslog.LOG_INFO, "AMQP Broker Started.")
 
-        ########################################################
+        # Start SMPPServerPB Client
         try:
-            # Start SMPPServerPB Client
             yield self.startSMPPServerPBClient()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start SMPPServerPBClient: %s" % e)
+            syslog.syslog(syslog.LOG_ERR, f"Cannot start SMPPServerPBClient: {e}")
         else:
-            syslog.syslog(syslog.LOG_INFO, "  SMPPServerPBClientStarted.")
+            syslog.syslog(syslog.LOG_INFO, "SMPPServerPBClient Started.")
 
-        ########################################################
+        # Start DLRThrower
         try:
-            # Start DLRThrower
             yield self.startDLRThrowerService()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start DLRThrower: %s" % e)
+            syslog.syslog(syslog.LOG_ERR, f"Cannot start DLRThrower: {e}")
         else:
-            syslog.syslog(syslog.LOG_INFO, "  DLRThrower Started.")
+            syslog.syslog(syslog.LOG_INFO, "DLRThrower Started.")
 
     @defer.inlineCallbacks
     def stop(self):
-        """Stop Dlrd daemon"""
+        """Stop all services and gracefully shut down."""
         syslog.syslog(syslog.LOG_INFO, "Stopping Dlr Daemon ...")
 
         if 'smpps-pb-client' in self.components:
             yield self.stopSMPPServerPBClient()
-            syslog.syslog(syslog.LOG_INFO, "  SMPPServerPBClient stopped.")
+            syslog.syslog(syslog.LOG_INFO, "SMPPServerPBClient stopped.")
 
         if 'dlr-thrower' in self.components:
             yield self.stopDLRThrowerService()
-            syslog.syslog(syslog.LOG_INFO, "  DLRThrower stopped.")
+            syslog.syslog(syslog.LOG_INFO, "DLRThrower stopped.")
 
         if 'amqp-broker-client' in self.components:
             yield self.stopAMQPBrokerService()
-            syslog.syslog(syslog.LOG_INFO, "  AMQP Broker disconnected.")
+            syslog.syslog(syslog.LOG_INFO, "AMQP Broker disconnected.")
 
         reactor.stop()
 
     def sighandler_stop(self, signum, frame):
-        """Handle stop signal cleanly"""
+        """Handle stop signals cleanly."""
         syslog.syslog(syslog.LOG_INFO, "Received signal to stop Dlr Daemon")
-
         return self.stop()
 
 
-if __name__ == '__main__':
+def main():
     lock = None
     try:
         options = Options()
         options.parseOptions()
 
-        # Must not be executed simultaneously (c.f. #265)
-        lock = FileLock("/tmp/dlrd-%s" % options['id'])
-
-        # Ensure there are no paralell runs of this script
+        lock_file = f"/tmp/dlrd-{options['id']}"
+        lock = FileLock(lock_file)
         lock.acquire(timeout=2)
 
-        # Prepare to start
         dlr_d = DlrDaemon(options)
+
         # Setup signal handlers
         signal.signal(signal.SIGINT, dlr_d.sighandler_stop)
         signal.signal(signal.SIGTERM, dlr_d.sighandler_stop)
+
         # Start DlrDaemon
         dlr_d.start()
-
         reactor.run()
+
     except usage.UsageError as errortext:
-        print('%s: %s' % (sys.argv[0], errortext))
-        print('%s: Try --help for usage details.' % (sys.argv[0]))
+        print(f'{sys.argv[0]}: {errortext}')
+        print(f'{sys.argv[0]}: Try --help for usage details.')
     except LockTimeout:
-        print("Lock not acquired ! exiting")
+        print("Lock not acquired! Exiting.")
     except AlreadyLocked:
-        print("There's another instance on dlrd running, exiting.")
+        print("Another instance of dlrd is already running, exiting.")
     finally:
-        # Release the lock
+        # Release the lock if held
         if lock is not None and lock.i_am_locking():
             lock.release()
+
+
+if __name__ == '__main__':
+    main()

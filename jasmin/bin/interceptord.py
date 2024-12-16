@@ -32,21 +32,27 @@ logger = logging.getLogger("interceptor-daemon")
 
 
 class Options(usage.Options):
+    """
+    Command line options for the interceptord daemon.
+    """
     optParameters = [
-        ['config', 'c', f'{CONFIG_PATH}/interceptor.cfg',
-         'Jasmin interceptor configuration file'],
+        ['config', 'c', f'{CONFIG_PATH}/interceptor.cfg', 'Jasmin interceptor configuration file'],
     ]
 
 
 class InterceptorDaemon(BaseDaemon):
+    """
+    Daemon class responsible for starting and stopping the Interceptor PB service.
+    """
+
     def startInterceptorPBService(self):
         """
-        Start Interceptor PB server.
+        Initialize and start the Interceptor PB server.
         """
         conf = InterceptorPBConfig(self.options['config'])
         self.components['interceptor-pb-factory'] = InterceptorPB(conf)
 
-        # Set authentication portal
+        # Set up authentication portal
         p = portal.Portal(JasminPBRealm(self.components['interceptor-pb-factory']))
         if conf.authentication:
             c = InMemoryUsernamePasswordDatabaseDontUse()
@@ -54,8 +60,10 @@ class InterceptorDaemon(BaseDaemon):
             p.registerChecker(c)
         else:
             p.registerChecker(AllowAnonymousAccess())
+
         jpb_root = JasminPBPortalRoot(p)
 
+        # Start listening for PB connections
         self.components['interceptor-pb-server'] = reactor.listenTCP(
             conf.port,
             pb.PBServerFactory(jpb_root),
@@ -64,18 +72,17 @@ class InterceptorDaemon(BaseDaemon):
 
     def stopInterceptorPBService(self):
         """
-        Stop Interceptor PB server.
+        Stop the Interceptor PB server.
         """
         return self.components['interceptor-pb-server'].stopListening()
 
     @defer.inlineCallbacks
     def start(self):
         """
-        Start Interceptord daemon.
+        Start the interceptord daemon and its services.
         """
         logger.info("Starting InterceptorPB Daemon...")
 
-        # Start Interceptor PB server
         try:
             yield self.startInterceptorPBService()
         except Exception as e:
@@ -86,7 +93,7 @@ class InterceptorDaemon(BaseDaemon):
     @defer.inlineCallbacks
     def stop(self):
         """
-        Stop Interceptord daemon.
+        Stop the interceptord daemon and its services.
         """
         logger.info("Stopping Interceptor Daemon...")
 
@@ -94,12 +101,12 @@ class InterceptorDaemon(BaseDaemon):
             yield self.stopInterceptorPBService()
             logger.info("InterceptorPB stopped.")
 
-        # Stop the reactor after services have been stopped
+        # Stop the reactor after all services have been stopped
         reactor.stop()
 
     def sighandler_stop(self, signum: int, frame):
         """
-        Handle stop signal cleanly.
+        Handle stop signals (SIGINT, SIGTERM) cleanly.
         """
         logger.info("Received signal to stop Interceptor Daemon")
         return self.stop()
@@ -115,13 +122,13 @@ if __name__ == '__main__':
         # Ensure no parallel runs of this script
         lock.acquire(timeout=2)
 
-        # Prepare to start
+        # Prepare and start the daemon
         in_d = InterceptorDaemon(options)
-        # Setup signal handlers
+
+        # Setup signal handlers for clean shutdown
         signal.signal(signal.SIGINT, in_d.sighandler_stop)
         signal.signal(signal.SIGTERM, in_d.sighandler_stop)
 
-        # Start the daemon
         in_d.start()
         reactor.run()
 
@@ -136,6 +143,6 @@ if __name__ == '__main__':
         print("Another instance of interceptord is already running, exiting.")
         sys.exit(1)
     finally:
-        # Release the lock if held
+        # Release the lock if we hold it
         if lock.i_am_locking():
             lock.release()

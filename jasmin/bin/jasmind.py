@@ -52,41 +52,55 @@ logging.basicConfig(
 
 
 class Options(usage.Options):
+    """
+    Command line options for the Jasmin Daemon.
+    """
     optParameters = [
         ['config', 'c', f'{CONFIG_PATH}/jasmin.cfg', 'Jasmin configuration file'],
-        ['username', 'u', None, 'jCli username used to load configuration profile on startup'],
-        ['password', 'p', None, 'jCli password used to load configuration profile on startup'],
+        ['username', 'u', None, 'jCli username to load configuration profile on startup'],
+        ['password', 'p', None, 'jCli password to load configuration profile on startup'],
     ]
 
     optFlags = [
-        ['disable-smpp-server', None, 'Do not start SMPP Server service'],
-        ['enable-dlr-thrower', None, 'Enable DLR Thrower service (not recommended: start the dlrd daemon instead)'],
-        ['enable-dlr-lookup', None, 'Enable DLR Lookup service (not recommended: start the dlrlookupd daemon instead)'],
-        ['disable-deliver-thrower', None, 'Do not start DeliverSm Thrower service'],
-        ['disable-http-api', None, 'Do not start HTTP API'],
-        ['disable-jcli', None, 'Do not start jCli console'],
-        ['enable-interceptor-client', None, 'Start Interceptor client'],
+        ['disable-smpp-server', None, 'Do not start the SMPP Server service'],
+        ['enable-dlr-thrower', None, 'Enable DLR Thrower service (not recommended, use dlrd daemon instead)'],
+        ['enable-dlr-lookup', None, 'Enable DLR Lookup service (not recommended, use dlrlookupd daemon instead)'],
+        ['disable-deliver-thrower', None, 'Do not start the DeliverSm Thrower service'],
+        ['disable-http-api', None, 'Do not start the HTTP API'],
+        ['disable-jcli', None, 'Do not start the jCli console'],
+        ['enable-interceptor-client', None, 'Start the Interceptor client service'],
     ]
 
 
 class JasminDaemon(BaseDaemon):
+    """
+    Jasmin Daemon main class.
+
+    Handles the initialization and shutdown procedures for all Jasmin services
+    including SMPP server, HTTP API, AMQP, Redis, Router, and various supporting
+    services.
+
+    Services are dynamically started or stopped based on the provided command line options.
+    """
+
     def __init__(self, opt):
         super().__init__(opt)
         self.log = logging.getLogger(LOG_CATEGORY)
-        self.log.propagate = False  # Already configured with basicConfig
+        self.log.propagate = False  # Already configured globally
+        self.components = {}  # Holds references to started components
 
     @defer.inlineCallbacks
     def startRedisClient(self):
         """Connect and initialize the Redis client."""
         redis_config = RedisForJasminConfig(self.options['config'])
         self.components['rc'] = yield ConnectionWithConfiguration(redis_config)
-        # Authenticate and select db if needed
+        # Authenticate and select db if password is set
         if redis_config.password is not None:
             yield self.components['rc'].auth(redis_config.password)
             yield self.components['rc'].select(redis_config.dbid)
 
     def stopRedisClient(self):
-        """Disconnect Redis client."""
+        """Disconnect the Redis client."""
         return self.components['rc'].disconnect()
 
     def startAMQPBrokerService(self):
@@ -95,7 +109,7 @@ class JasminDaemon(BaseDaemon):
         self.components['amqp-broker-factory'] = AmqpFactory(amqp_conf)
         self.components['amqp-broker-factory'].preConnect()
 
-        # Add service
+        # Connect to AMQP broker
         self.components['amqp-broker-client'] = reactor.connectTCP(
             amqp_conf.host,
             amqp_conf.port,
@@ -111,7 +125,7 @@ class JasminDaemon(BaseDaemon):
         router_conf = RouterPBConfig(self.options['config'])
         self.components['router-pb-factory'] = RouterPB(router_conf)
 
-        # Set authentication portal
+        # Authentication portal for RouterPB
         p = portal.Portal(JasminPBRealm(self.components['router-pb-factory']))
         if router_conf.authentication:
             c = InMemoryUsernamePasswordDatabaseDontUse()
@@ -119,19 +133,19 @@ class JasminDaemon(BaseDaemon):
             p.registerChecker(c)
         else:
             p.registerChecker(AllowAnonymousAccess())
-        jpb_root = JasminPBPortalRoot(p)
 
+        jpb_root = JasminPBPortalRoot(p)
         self.components['router-pb-server'] = reactor.listenTCP(
             router_conf.port,
             pb.PBServerFactory(jpb_root),
             interface=router_conf.bind
         )
 
-        # AMQP Broker is used to listen to deliver_sm/dlr queues
+        # Add AMQP broker to router
         return self.components['router-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopRouterPBService(self):
-        """Stop Router PB server."""
+        """Stop RouterPB server."""
         return self.components['router-pb-server'].stopListening()
 
     def startSMPPClientManagerPBService(self):
@@ -139,7 +153,7 @@ class JasminDaemon(BaseDaemon):
         smpp_client_conf = SMPPClientPBConfig(self.options['config'])
         self.components['smppcm-pb-factory'] = SMPPClientManagerPB(smpp_client_conf)
 
-        # Set authentication portal
+        # Authentication portal for SMPPClientManagerPB
         p = portal.Portal(JasminPBRealm(self.components['smppcm-pb-factory']))
         if smpp_client_conf.authentication:
             c = InMemoryUsernamePasswordDatabaseDontUse()
@@ -155,16 +169,12 @@ class JasminDaemon(BaseDaemon):
             interface=smpp_client_conf.bind
         )
 
-        # AMQP and Redis integration
+        # Add AMQP, Redis, RouterPB, and possibly InterceptorPBClient
         self.components['smppcm-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
         self.components['smppcm-pb-factory'].addRedisClient(self.components['rc'])
         self.components['smppcm-pb-factory'].addRouterPB(self.components['router-pb-factory'])
-
-        # Interceptor if enabled
         if 'interceptor-pb-client' in self.components:
-            self.components['smppcm-pb-factory'].addInterceptorPBClient(
-                self.components['interceptor-pb-client']
-            )
+            self.components['smppcm-pb-factory'].addInterceptorPBClient(self.components['interceptor-pb-client'])
 
     def stopSMPPClientManagerPBService(self):
         """Stop SMPP Client Manager PB server."""
@@ -178,7 +188,7 @@ class JasminDaemon(BaseDaemon):
         yield self.components['dlrlookup'].subscribe()
 
     def startSMPPServerPBService(self):
-        """Start SMPP Server PB server."""
+        """Start SMPP Server PB service."""
         smpp_server_pb_conf = SMPPServerPBConfig(self.options['config'])
         self.components['smpps-pb-factory'] = SMPPServerPB(smpp_server_pb_conf)
 
@@ -234,36 +244,33 @@ class JasminDaemon(BaseDaemon):
         """Stop SMPP Server."""
         return self.components['smpp-server'].stopListening()
 
+    @defer.inlineCallbacks
     def startdeliverSmThrowerService(self):
-        """Start deliverSmThrower."""
+        """Start DeliverSm Thrower service."""
         deliver_conf = deliverSmThrowerConfig(self.options['config'])
         self.components['deliversm-thrower'] = deliverSmThrower(deliver_conf)
         self.components['deliversm-thrower'].addSmpps(self.components['smpp-server-factory'])
-
-        # AMQP Broker integration
-        return self.components['deliversm-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
+        yield self.components['deliversm-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopdeliverSmThrowerService(self):
-        """Stop deliverSmThrower."""
+        """Stop DeliverSm Thrower service."""
         return self.components['deliversm-thrower'].stopService()
 
+    @defer.inlineCallbacks
     def startDLRThrowerService(self):
-        """Start DLRThrower."""
+        """Start DLR Thrower service."""
         dlr_thrower_conf = DLRThrowerConfig(self.options['config'])
         self.components['dlr-thrower'] = DLRThrower(dlr_thrower_conf)
         self.components['dlr-thrower'].addSmpps(self.components['smpp-server-factory'])
-
-        # AMQP Broker integration
-        return self.components['dlr-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
+        yield self.components['dlr-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
 
     def stopDLRThrowerService(self):
-        """Stop DLRThrower."""
+        """Stop DLR Thrower service."""
         return self.components['dlr-thrower'].stopService()
 
     def startHTTPApiService(self):
-        """Start HTTP API."""
+        """Start the HTTP API service."""
         http_conf = HTTPApiConfig(self.options['config'])
-
         interceptorpb_client = self.components.get('interceptor-pb-client', None)
 
         self.components['http-api-factory'] = HTTPApi(
@@ -280,11 +287,11 @@ class JasminDaemon(BaseDaemon):
         )
 
     def stopHTTPApiService(self):
-        """Stop HTTP API."""
+        """Stop HTTP API service."""
         return self.components['http-api-server'].stopListening()
 
     def startJCliService(self):
-        """Start jCli console server."""
+        """Start the jCli console server."""
         loadConfigProfileWithCreds = {
             'username': self.options['username'],
             'password': self.options['password']
@@ -305,7 +312,7 @@ class JasminDaemon(BaseDaemon):
         )
 
     def stopJCliService(self):
-        """Stop jCli console server."""
+        """Stop the jCli console server."""
         return self.components['jcli-server'].stopListening()
 
     def startInterceptorPBClient(self):
@@ -327,7 +334,7 @@ class JasminDaemon(BaseDaemon):
 
     @defer.inlineCallbacks
     def start(self):
-        """Start Jasmin Daemon main services."""
+        """Start all Jasmin Daemon services based on the given options."""
         self.log.info("Starting Jasmin Daemon ...")
 
         # Optional interceptor client
@@ -436,7 +443,7 @@ class JasminDaemon(BaseDaemon):
 
     @defer.inlineCallbacks
     def stop(self):
-        """Stop Jasmin Daemon cleanly."""
+        """Stop all Jasmin Daemon services cleanly."""
         self.log.info("Stopping Jasmin Daemon ...")
 
         if 'jcli-server' in self.components:
@@ -486,7 +493,9 @@ class JasminDaemon(BaseDaemon):
         reactor.stop()
 
     def sighandler_stop(self, signum: int, frame: Optional[object]):
-        """Handle system signals to stop Jasmin Daemon cleanly."""
+        """
+        Handle system signals to stop Jasmin Daemon cleanly.
+        """
         self.log.info("Received signal to stop Jasmin Daemon")
         return self.stop()
 

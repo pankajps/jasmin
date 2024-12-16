@@ -7,112 +7,112 @@ import configparser as ConfigParser
 # Setting base paths
 ROOT_PATH = os.getenv('ROOT_PATH', '/')
 HOSTNAME = os.getenv('HOSTNAME', 'default-hostname')
-if 'KUBERNETES_SERVICE_HOST' in os.environ:
-    # Bypass environment's LOG_PATH variable and set it based on pod's hostname
-    LOG_PATH = '%s/var/log/jasmin/%s' % (ROOT_PATH, HOSTNAME)
-else:
-    LOG_PATH = os.getenv('LOG_PATH', '%s/var/log/jasmin' % ROOT_PATH)
-
+LOG_PATH = (
+    os.path.join(ROOT_PATH, 'var', 'log', 'jasmin', HOSTNAME)
+    if 'KUBERNETES_SERVICE_HOST' in os.environ
+    else os.getenv('LOG_PATH', os.path.join(ROOT_PATH, 'var', 'log', 'jasmin'))
+)
 
 class ConfigFile:
     """
-    Config file reader, will expose typed "ex: _getint()" and untyped "ex: _get()" with
-    default fallback values to be returned if a configuration directive is not found or
-    commented
+    Config file reader to expose typed (e.g., _getint()) and untyped (e.g., _get())
+    methods with default fallback values.
     """
 
     def __init__(self, config_file=None):
+        """
+        Initialize the ConfigFile object.
+        :param config_file: Path to the configuration file.
+        """
         self.config_file = config_file
-
-        # Parse config files and set options
         self.config = ConfigParser.RawConfigParser()
+
         if self.config_file is not None:
             self.config.read(config_file)
 
     def getConfigFile(self):
-        """Return the current config_file"""
-
+        """Return the current configuration file path."""
         return self.config_file
 
     def _get(self, section, option, default=None):
         """
-        Will check if section.option exists in config_file, return its value, default
-        otherwise
+        Retrieve a configuration value.
+        :param section: Configuration section.
+        :param option: Option within the section.
+        :param default: Default value if option is not found.
+        :return: Value from the configuration or environment variable.
         """
-        if self._convert_to_env_var_str(('%s_%s' % (section, option))) in os.environ:
-            return os.environ[self._convert_to_env_var_str('%s_%s' % (section, option))]
-        if not self.config.has_section(section):
-            return default
-        if not self.config.has_option(section, option):
-            return default
-        if self.config.get(section, option) == 'None':
-            return None
-
-        return self.config.get(section, option)
+        return self._fetch_value(section, option, default, cast=str)
 
     def _getint(self, section, option, default=None):
         """
-        Will check if section.option exists in config_file, return its int casted value,
-        default otherwise
+        Retrieve an integer configuration value.
+        :param section: Configuration section.
+        :param option: Option within the section.
+        :param default: Default value if option is not found.
+        :return: Integer value from the configuration or environment variable.
         """
-
-        if self._convert_to_env_var_str('%s_%s' % (section, option)) in os.environ:
-            return int(os.environ[self._convert_to_env_var_str('%s_%s' % (section, option))])
-        if not self.config.has_section(section):
-            return default
-        if not self.config.has_option(section, option):
-            return default
-        if self.config.get(section, option) == 'None':
-            return default
-
-        return self.config.getint(section, option)
+        return self._fetch_value(section, option, default, cast=int)
 
     def _getfloat(self, section, option, default=None):
         """
-        Will check if section.option exists in config_file, return its float casted value,
-        default otherwise
+        Retrieve a float configuration value.
+        :param section: Configuration section.
+        :param option: Option within the section.
+        :param default: Default value if option is not found.
+        :return: Float value from the configuration or environment variable.
         """
-
-        if self._convert_to_env_var_str(('%s_%s' % (section, option))) in os.environ:
-            return float(os.environ[self._convert_to_env_var_str('%s_%s' % (section, option))])
-        if not self.config.has_section(section):
-            return default
-        if not self.config.has_option(section, option):
-            return default
-        if self.config.get(section, option) == 'None':
-            return default
-
-        return self.config.getfloat(section, option)
+        return self._fetch_value(section, option, default, cast=float)
 
     def _getbool(self, section, option, default=None):
         """
-        Will check if section.option exists in config_file, return its bool casted value,
-        default otherwise
+        Retrieve a boolean configuration value.
+        :param section: Configuration section.
+        :param option: Option within the section.
+        :param default: Default value if option is not found.
+        :return: Boolean value from the configuration or environment variable.
         """
+        return self._fetch_value(section, option, default, cast=self._convert_to_bool)
 
-        if self._convert_to_env_var_str(('%s_%s' % (section.replace('-', '_'), option))) in os.environ:
-            return self._convert_to_bool(os.environ[self._convert_to_env_var_str('%s_%s' % (section, option))])
+    def _fetch_value(self, section, option, default, cast):
+        """
+        Generalized method to fetch and cast configuration values.
+        :param section: Configuration section.
+        :param option: Option within the section.
+        :param default: Default value if option is not found.
+        :param cast: Callable to cast the retrieved value.
+        :return: The casted value.
+        """
+        env_var = self._convert_to_env_var_str(f"{section}_{option}")
+        if env_var in os.environ:
+            return cast(os.environ[env_var])
+
         if not self.config.has_section(section):
             return default
+
         if not self.config.has_option(section, option):
             return default
 
-        return self.config.getboolean(section, option)
+        value = self.config.get(section, option)
+        if value == 'None':
+            return default
+
+        return cast(value)
 
     def _convert_to_bool(self, value):
+        """
+        Convert a value to boolean.
+        :param value: Value to convert.
+        :return: Boolean representation of the value.
+        """
         if isinstance(value, str):
             return value.lower() in ['t', 'true', 'yes', 'y', '1']
         return bool(value)
 
     def _convert_to_env_var_str(self, env_str):
         """
-        Dashes in env strings don't work well in bash so we shouldnt expect them
-        This is not the value stored in the var but the var name itself
-        Also converts it to upper case
-
-        :param env_str: The string to convert to an env friendly string
-        :type env_str: str
-        :return: converted string
-        :rtype: str
+        Convert a string to an environment-friendly uppercase format.
+        :param env_str: Input string.
+        :return: Converted string.
         """
         return env_str.replace('-', '_').upper()

@@ -16,76 +16,78 @@ class SMPPServerPB(pb.Avatar):
         self.config = SmppServerPBConfig
         self.avatar = None
         self.smpps = None
+        self.log = self._setup_logger()
+        self.log.info('SmppServerPB configured and ready.')
 
-        # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
+    def _setup_logger(self):
+        """Set up and return a dedicated logger instance."""
+        log = logging.getLogger(LOG_CATEGORY)
+        if not log.handlers:
+            log.setLevel(self.config.log_level)
+
             if 'stdout' in self.config.log_file:
                 handler = logging.StreamHandler(sys.stdout)
             else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file, when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+                handler = TimedRotatingFileHandler(
+                    filename=self.config.log_file,
+                    when=self.config.log_rotate
+                )
 
-        self.log.info('SmppServerPB configured and ready.')
+            formatter = logging.Formatter(
+                self.config.log_format,
+                self.config.log_date_format
+            )
+            handler.setFormatter(formatter)
+            log.addHandler(handler)
+            log.propagate = False
+        return log
 
     def setAvatar(self, avatar):
+        """Set the avatar (authenticated user) for the current connection."""
         if isinstance(avatar, str):
             self.log.info('Authenticated Avatar: %s', avatar)
         else:
             self.log.info('Anonymous connection')
-
         self.avatar = avatar
 
     def addSmpps(self, smppsFactory):
-        if self.smpps is None:
-            self.log.info('Added SMPP Server: %s', smppsFactory.config.id)
-        else:
-            self.log.info('Replaced SMPP Server: %s', smppsFactory.config.id)
-
+        """Associate or replace the SMPP server instance."""
+        message = 'Added' if self.smpps is None else 'Replaced'
+        self.log.info('%s SMPP Server: %s', message, smppsFactory.config.id)
         self.smpps = smppsFactory
 
     def perspective_list_bound_systemids(self):
-        """Returning list of bound smpp systemd_ids"""
-
-        systemdids = []
-        for bound_connection in self.smpps.bound_connections:
-            systemdids.append(bound_connection)
-
-        return systemdids
+        """Return a list of currently bound SMPP system IDs."""
+        return list(self.smpps.bound_connections.keys()) if self.smpps else []
 
     @defer.inlineCallbacks
     def perspective_deliverer_send_request(self, system_id, pdu, pickled=True):
-        """Will lookup for a deliverer (for system_id) and call sendRequest on it"""
+        """
+        Forward a PDU to the appropriate deliverer for the given system_id.
+        If pickled is True, the PDU is unpickled first.
+        """
+        bound_connection = self.smpps.bound_connections.get(system_id) if self.smpps else None
+        deliverer = bound_connection.getNextBindingForDelivery() if bound_connection else None
 
-        if system_id in self.smpps.bound_connections:
-            deliverer = self.smpps.bound_connections[system_id].getNextBindingForDelivery()
-        else:
-            deliverer = None
-
-        # There were no deliverers !
         if deliverer is None:
-            self.log.error('Found no deliverer on system_id %s', system_id)
+            self.log.error('Found no deliverer for system_id %s', system_id)
+            defer.returnValue(False)
+
+        if pickled:
+            pdu = pickle.loads(pdu)
+
+        try:
+            yield deliverer.sendRequest(pdu, deliverer.config().responseTimerSecs)
+        except Exception as e:
+            self.log.exception('Error while sending PDU through deliverer (system_id: %s): %s', system_id, e)
             defer.returnValue(False)
         else:
-            if pickled:
-                pdu = pickle.loads(pdu)
-
-            try:
-                # Push pdu through the deliverer
-                yield deliverer.sendRequest(pdu, deliverer.config().responseTimerSecs)
-            except Exception as e:
-                self.log.error('Caught an error while trying to push pdu through deliverer (system_id:%s): (%s) %s',
-                               system_id, e.__class__.__name__, e)
-                defer.returnValue(False)
-            else:
-                defer.returnValue(True)
+            defer.returnValue(True)
 
     def perspective_version_release(self):
+        """Return the current Jasmin release version."""
         return jasmin.get_release()
 
     def perspective_version(self):
+        """Return the current Jasmin version."""
         return jasmin.get_version()

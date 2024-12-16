@@ -22,14 +22,16 @@ LOG_CATEGORY = "jasmin-pb-client-mgmt"
 
 
 class ConfigProfileLoadingError(Exception):
-    """
-    Raised for any error occurring while loading a configuration
-    profile with perspective_load
-    """
+    """Raised for any error occurring while loading a configuration profile."""
 
 
 class SMPPClientManagerPB(pb.Avatar):
     def __init__(self, SMPPClientPBConfig):
+        """
+        Initialize the SMPPClientManagerPB.
+
+        :param SMPPClientPBConfig: Configuration object for SMPP Client PB.
+        """
         self.config = SMPPClientPBConfig
         self.avatar = None
         self.redisClient = None
@@ -39,9 +41,7 @@ class SMPPClientManagerPB(pb.Avatar):
         self.connectors = []
         self.declared_queues = []
         self.pickleProtocol = pickle.HIGHEST_PROTOCOL
-
-        # Persistence flag, accessed through perspective_is_persisted
-        self.persisted = True
+        self.persisted = True  # Persistence flag
 
         # Set up a dedicated logger
         self.log = logging.getLogger(LOG_CATEGORY)
@@ -50,80 +50,80 @@ class SMPPClientManagerPB(pb.Avatar):
             if 'stdout' in self.config.log_file:
                 handler = logging.StreamHandler(sys.stdout)
             else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file,
-                                                   when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format,
-                                          self.config.log_date_format)
+                handler = TimedRotatingFileHandler(
+                    filename=self.config.log_file,
+                    when=self.config.log_rotate
+                )
+            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
             handler.setFormatter(formatter)
             self.log.addHandler(handler)
             self.log.propagate = False
 
-        # Set pickleProtocol
+        # Set pickleProtocol from config
         self.pickleProtocol = self.config.pickle_protocol
 
-        self.log.info('SMPP Client manager configured and ready.')
+        self.log.info(f'SMPP Client manager configured and ready.')
 
     def setAvatar(self, avatar):
-        if type(avatar) is str:
-            self.log.info('Authenticated Avatar: %s', avatar)
+        if isinstance(avatar, str):
+            self.log.info(f'Authenticated Avatar: {avatar}')
         else:
             self.log.info('Anonymous connection')
-
         self.avatar = avatar
 
     def addAmqpBroker(self, amqpBroker):
         self.amqpBroker = amqpBroker
-
         self.log.info('Added amqpBroker to SMPPClientManagerPB')
 
     def addRedisClient(self, redisClient):
         self.redisClient = redisClient
-
         self.log.info('Added Redis Client to SMPPClientManagerPB')
 
     def addInterceptorPBClient(self, interceptorpb_client):
         self.interceptorpb_client = interceptorpb_client
-
         self.log.info('Added interceptorpb_client to SMPPClientManagerPB')
 
     def addRouterPB(self, RouterPB):
         self.RouterPB = RouterPB
-
         self.log.info('Added RouterPB to SMPPClientManagerPB')
 
     def getConnector(self, cid):
+        """Retrieve connector by cid."""
         for c in self.connectors:
             if str(c['id']) == str(cid):
-                self.log.debug('getConnector [%s] returned a connector', cid)
+                self.log.debug(f'getConnector [{cid}] returned a connector')
                 return c
 
-        self.log.debug('getConnector [%s] returned None', cid)
+        self.log.debug(f'getConnector [{cid}] returned None')
         return None
 
     def getConnectorDetails(self, cid):
+        """Get a dictionary of connector details."""
         c = self.getConnector(cid)
         if c is None:
-            self.log.debug('getConnectorDetails [%s] returned None', cid)
+            self.log.debug(f'getConnectorDetails [{cid}] returned None')
             return None
 
-        details = {}
-        details['id'] = c['id']
-        details['session_state'] = c['service'].SMPPClientFactory.getSessionState().name
-        details['service_status'] = c['service'].running
-        details['start_count'] = c['service'].startCounter
-        details['stop_count'] = c['service'].stopCounter
+        details = {
+            'id': c['id'],
+            'session_state': c['service'].SMPPClientFactory.getSessionState().name,
+            'service_status': c['service'].running,
+            'start_count': c['service'].startCounter,
+            'stop_count': c['service'].stopCounter
+        }
 
-        self.log.debug('getConnectorDetails [%s] returned details', cid)
+        self.log.debug(f'getConnectorDetails [{cid}] returned details')
         return details
 
     def delConnector(self, cid):
-        for i in range(len(self.connectors)):
-            if str(self.connectors[i]['id']) == str(cid):
+        """Delete a connector by cid."""
+        for i, conn in enumerate(self.connectors):
+            if str(conn['id']) == str(cid):
                 del self.connectors[i]
-                self.log.debug('Deleted connector [%s].', cid)
+                self.log.debug(f'Deleted connector [{cid}].')
                 return True
 
-        self.log.debug('Deleting connector [%s] failed.', cid)
+        self.log.debug(f'Deleting connector [{cid}] failed.')
         return False
 
     def perspective_version_release(self):
@@ -133,86 +133,80 @@ class SMPPClientManagerPB(pb.Avatar):
         return jasmin.get_version()
 
     def perspective_persist(self, profile='jcli-prod'):
-        path = '%s/%s.smppccs' % (self.config.store_path, profile)
-        self.log.info('Persisting current configuration to [%s] profile in %s', profile, path)
+        """
+        Persist current configuration to a profile file.
+        """
+        path = f'{self.config.store_path}/{profile}.smppccs'
+        self.log.info(f'Persisting current configuration to [{profile}] profile in {path}')
 
         try:
-            # Prepare connectors for persistence
-            # Will persist config and service status only
-            connectors = []
+            connectors_data = []
             for c in self.connectors:
-                connectors.append({
+                connectors_data.append({
                     'id': c['id'],
                     'config': c['config'],
-                    'service_status': c['service'].running})
+                    'service_status': c['service'].running
+                })
 
-            # Write configuration with datetime stamp
-            fh = open(path, 'wb')
-            fh.write(('Persisted on %s [Jasmin %s]\n' % (time.strftime("%c"), jasmin.get_release())).encode('ascii'))
-            fh.write(pickle.dumps(connectors, self.pickleProtocol))
-            fh.close()
+            with open(path, 'wb') as fh:
+                fh.write((f'Persisted on {time.strftime("%c")} [Jasmin {jasmin.get_release()}]\n').encode('ascii'))
+                fh.write(pickle.dumps(connectors_data, self.pickleProtocol))
 
-            # Set persistance state to True
+            # Mark state as persisted
             self.persisted = True
         except IOError:
-            self.log.error('Cannot persist to %s', path)
+            self.log.error(f'Cannot persist to {path}')
             return False
         except Exception as e:
-            self.log.error('Unknown error occurred while persisting configuration: %s', e)
+            self.log.error(f'Unknown error occurred while persisting configuration: {e}')
             return False
 
         return True
 
     @defer.inlineCallbacks
     def perspective_load(self, profile='jcli-prod'):
-        path = '%s/%s.smppccs' % (self.config.store_path, profile)
-        self.log.info('Loading/Activating [%s] profile configuration from %s', profile, path)
+        """
+        Load and activate a given configuration profile.
+        """
+        path = f'{self.config.store_path}/{profile}.smppccs'
+        self.log.info(f'Loading/Activating [{profile}] profile configuration from {path}')
 
         try:
-            # Load configuration from file
-            fh = open(path, 'rb')
-            lines = fh.readlines()
-            fh.close()
+            with open(path, 'rb') as fh:
+                lines = fh.readlines()
 
-            # Init migrator
-            cf = ConfigurationMigrator(context='smppccs', header=lines[0].decode('ascii'), data=b''.join(lines[1:]))
+            # Initialize migrator
+            cf = ConfigurationMigrator(context='smppccs', header=lines[0].decode('ascii'),
+                                       data=b''.join(lines[1:]))
 
             # Remove current configuration
-            CIDs = []
-            for c in self.connectors:
-                CIDs.append(c['id'])
-            for cid in CIDs:
-                remRet = yield self.perspective_connector_remove(cid)
-                if not remRet:
-                    raise ConfigProfileLoadingError('Error removing connector %s' % cid)
-                self.log.info('Removed connector [%s]', cid)
+            yield self._remove_all_connectors()
 
             # Apply configuration
             loadedConnectors = cf.getMigratedData()
             for loadedConnector in loadedConnectors:
-                # Add connector
                 addRet = yield self.perspective_connector_add(
-                    pickle.dumps(loadedConnector['config'],
-                                 self.pickleProtocol))
+                    pickle.dumps(loadedConnector['config'], self.pickleProtocol)
+                )
                 if not addRet:
-                    raise ConfigProfileLoadingError('Error adding connector %s' % loadedConnector['id'])
+                    raise ConfigProfileLoadingError(f'Error adding connector {loadedConnector["id"]}')
 
-                # Start it if it's service where started when persisted
                 if loadedConnector['service_status'] == 1:
                     startRet = yield self.perspective_connector_start(loadedConnector['id'])
                     if not startRet:
-                        self.log.error('Error starting connector %s', loadedConnector['id'])
+                        self.log.error(f'Error starting connector {loadedConnector["id"]}')
 
-            # Set persistance state to True
+            # Mark as persisted
             self.persisted = True
+
         except IOError as e:
-            self.log.error('Cannot load configuration from %s: %s', path, str(e))
+            self.log.error(f'Cannot load configuration from {path}: {e}')
             defer.returnValue(False)
         except ConfigProfileLoadingError as e:
-            self.log.error('Error while loading configuration: %s', e)
+            self.log.error(f'Error while loading configuration: {e}')
             defer.returnValue(False)
         except Exception as e:
-            self.log.error('Unknown error occurred while loading configuration: %s', e)
+            self.log.error(f'Unknown error occurred while loading configuration: {e}')
             defer.returnValue(False)
 
         defer.returnValue(True)
@@ -222,53 +216,39 @@ class SMPPClientManagerPB(pb.Avatar):
 
     @defer.inlineCallbacks
     def perspective_connector_add(self, ClientConfig):
-        """This will add a new connector to self.connectors
-        and get a listener on submit.sm.%cid queue, this listener will be
-        started and stopped when the connector will get started and stopped
-        through this API"""
-
+        """
+        Add a new connector.
+        """
         c = pickle.loads(ClientConfig)
-
-        self.log.debug('Adding a new connector %s', c.id)
+        self.log.debug(f'Adding a new connector {c.id}')
 
         if self.getConnector(c.id) is not None:
-            self.log.error('Trying to add a new connector with an already existant cid: %s', c.id)
-            defer.returnValue(False)
-        if self.amqpBroker is None:
-            self.log.error('AMQP Broker is not added')
-            defer.returnValue(False)
-        if self.amqpBroker.connected == False:
-            self.log.error('AMQP Broker channel is not yet ready')
+            self.log.error(f'Connector with cid {c.id} already exists')
             defer.returnValue(False)
 
-        # Fix prefetch limit per consumer to 1 to get correct throttling
+        if not self._check_amqp_broker():
+            defer.returnValue(False)
+
+        # Set prefetch limit for throttling
         yield self.amqpBroker.chan.basic_qos(prefetch_count=1)
 
-        # Declare queues
-        # First declare the messaging exchange (has no effect if its already declared)
-        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
-        # submit.sm queue declaration and binding
-        submit_sm_queue = 'submit.sm.%s' % c.id
-        routing_key = 'submit.sm.%s' % c.id
-        self.log.info('Binding %s queue to %s route_key', submit_sm_queue, routing_key)
+        # Declare submit_sm queue and bind
+        submit_sm_queue = f'submit.sm.{c.id}'
+        routing_key = f'submit.sm.{c.id}'
+        self.log.info(f'Binding {submit_sm_queue} queue to {routing_key} route_key')
         yield self.amqpBroker.named_queue_declare(queue=submit_sm_queue)
-        yield self.amqpBroker.chan.queue_bind(queue=submit_sm_queue,
-                                              exchange="messaging",
-                                              routing_key=routing_key)
+        yield self.amqpBroker.chan.queue_bind(queue=submit_sm_queue, exchange="messaging", routing_key=routing_key)
 
-        # Instanciate smpp client service manager
+        # Setup SMPP client service
         serviceManager = SMPPClientService(c, self.config)
-
-        # Instanciate a SM listener
         smListener = SMPPClientSMListener(
             config=SMPPClientSMListenerConfig(self.config.config_file),
             SMPPClientFactory=serviceManager.SMPPClientFactory,
             amqpBroker=self.amqpBroker,
             redisClient=self.redisClient,
             RouterPB=self.RouterPB,
-            interceptorpb_client=self.interceptorpb_client)
-
-        # Deliver_sm are sent to smListener's deliver_sm callback method
+            interceptorpb_client=self.interceptorpb_client
+        )
         serviceManager.SMPPClientFactory.msgHandler = smListener.deliver_sm_event_interceptor
 
         self.connectors.append({
@@ -277,169 +257,155 @@ class SMPPClientManagerPB(pb.Avatar):
             'service': serviceManager,
             'consumer_tag': None,
             'submit_sm_q': None,
-            'sm_listener': smListener})
+            'sm_listener': smListener
+        })
 
-        self.log.info('Added a new connector: %s', c.id)
+        self.log.info(f'Added a new connector: {c.id}')
 
-        # Set persistance state to False (pending for persistance)
+        # Mark as not persisted
         self.persisted = False
-
         defer.returnValue(True)
 
     @defer.inlineCallbacks
     def perspective_connector_remove(self, cid):
-        """This will stop and remove a connector from self.connectors"""
-
-        self.log.debug('Removing connector [%s]', cid)
+        """
+        Remove a connector after stopping it.
+        """
+        self.log.debug(f'Removing connector [{cid}]')
 
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to remove a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             defer.returnValue(False)
+
+        # Stop before removal
         if connector['service'].running == 1:
-            self.log.debug('Stopping service for connector [%s] before removing it', cid)
+            self.log.debug(f'Stopping service for connector [{cid}] before removing')
             connector['service'].stopService()
 
-        # Stop the queue consumer
-        self.log.debug('Stopping submit_sm_q consumer in connector [%s]', cid)
+        # Stop the queue consumer if any
         yield self.perspective_connector_stop(cid)
 
         if self.delConnector(cid):
-            self.log.info('Removed connector [%s]', cid)
-            # Set persistance state to False (pending for persistance)
+            self.log.info(f'Removed connector [{cid}]')
             self.persisted = False
             defer.returnValue(True)
         else:
-            self.log.error('Error removing connector [%s], cid not found', cid)
+            self.log.error(f'Error removing connector [{cid}], cid not found')
             defer.returnValue(False)
 
-        # Set persistance state to False (pending for persistance)
         self.persisted = False
         defer.returnValue(True)
 
     def perspective_connector_list(self):
-        """This will return only connector IDs since returning an already copyed SMPPClientConfig
-        would be a headache"""
-
-        self.log.debug('Connector list requested, returning %s', self.connectors)
+        """
+        Return a list of all connectors with limited details.
+        """
+        self.log.debug(f'Connector list requested, returning {self.connectors}')
 
         connectorList = []
         for connector in self.connectors:
             c = self.getConnectorDetails(connector['id'])
-
             connectorList.append(c)
 
-        self.log.info('Returning a list of %s connectors', len(connectorList))
+        self.log.info(f'Returning a list of {len(connectorList)} connectors')
         return connectorList
 
     @defer.inlineCallbacks
     def perspective_connector_start(self, cid):
-        """This will start a service by adding IService to IServiceCollection
         """
-
-        self.log.debug('Starting connector [%s]', cid)
+        Start a connector service.
+        """
+        self.log.debug(f'Starting connector [{cid}]')
 
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to start a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             defer.returnValue(False)
-        if self.amqpBroker is None:
-            self.log.error('AMQP Broker is not added')
+
+        if not self._check_amqp_broker():
             defer.returnValue(False)
-        if self.amqpBroker.connected == False:
-            self.log.error('AMQP Broker channel is not yet ready')
-            defer.returnValue(False)
+
         if connector['service'].running == 1:
-            self.log.error('Connector [%s] is already running.', cid)
+            self.log.error(f'Connector [{cid}] is already running.')
             defer.returnValue(False)
+
+        # Check acceptable start states
         acceptedStartStates = [None, SMPPSessionStates.NONE, SMPPSessionStates.UNBOUND]
         if connector['service'].SMPPClientFactory.getSessionState() not in acceptedStartStates:
-            self.log.error(
-                'Connector [%s] cannot be started when in session_state: %s',
-                cid,
-                connector['service'].SMPPClientFactory.getSessionState())
+            state = connector['service'].SMPPClientFactory.getSessionState()
+            self.log.error(f'Connector [{cid}] cannot start in session_state: {state}')
             defer.returnValue(False)
 
         connector['service'].startService()
 
-        # Start the queue consumer
-        self.log.debug('Starting submit_sm_q consumer in connector [%s]', cid)
-
-        # Subscribe to submit.sm.%cid queue
-        # check jasmin.queues.test.test_amqp.PublishConsumeTestCase.test_simple_publish_consume_by_topic
-        submit_sm_queue = 'submit.sm.%s' % connector['id']
-        consumerTag = 'SMPPClientFactory-%s' % (connector['id'])
+        # Start the queue consumer for submit_sm
+        submit_sm_queue = f'submit.sm.{connector["id"]}'
+        consumerTag = f'SMPPClientFactory-{connector["id"]}'
 
         try:
-            # Using the same consumerTag will prevent getting multiple consumers on the same queue
-            # This can resolve the dark hole issue #234
-
-            # Stop the queue consumer if any
+            # If there's an existing consumer, stop it first
             if connector['consumer_tag'] is not None:
-                self.log.debug('Stopping submit_sm_q consumer in connector [%s]', cid)
+                self.log.debug(f'Stopping submit_sm_q consumer in connector [{cid}]')
                 yield self.amqpBroker.chan.basic_cancel(consumer_tag=connector['consumer_tag'])
 
-            # Start a new consumer
-            yield self.amqpBroker.chan.basic_consume(queue=submit_sm_queue,
-                                                     no_ack=False, consumer_tag=consumerTag)
+            yield self.amqpBroker.chan.basic_consume(
+                queue=submit_sm_queue,
+                no_ack=False, consumer_tag=consumerTag
+            )
         except Exception as e:
-            self.log.error('Error consuming from queue %s: %s', submit_sm_queue, e)
+            self.log.error(f'Error consuming from queue {submit_sm_queue}: {e}')
             defer.returnValue(False)
 
         submit_sm_q = yield self.amqpBroker.client.queue(consumerTag)
-        self.log.info('%s is consuming from queue: %s', consumerTag, submit_sm_queue)
+        self.log.info(f'{consumerTag} is consuming from queue: {submit_sm_queue}')
 
-        # Set callbacks for every consumed message from submit_sm_queue queue
         d = submit_sm_q.get()
         d.addCallback(connector['sm_listener'].submit_sm_callback).addErrback(
             connector['sm_listener'].submit_sm_errback)
 
-        self.log.info('Started connector [%s]', cid)
+        self.log.info(f'Started connector [{cid}]')
 
-        # Set connector data
         connector['sm_listener'].setSubmitSmQ(submit_sm_q)
         connector['consumer_tag'] = consumerTag
         connector['submit_sm_q'] = submit_sm_q
 
-        # Set persistance state to False (pending for persistance)
+        # Mark as not persisted
         self.persisted = False
-
         defer.returnValue(True)
 
     @defer.inlineCallbacks
     def perspective_connector_stop(self, cid, delQueues=False):
-        """This will stop a service by detaching IService to IServiceCollection
         """
-
-        self.log.debug('Stopping connector [%s]', cid)
+        Stop a connector service.
+        """
+        self.log.debug(f'Stopping connector [{cid}]')
 
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to stop a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             defer.returnValue(False)
 
         # Stop the queue consumer
         if connector['consumer_tag'] is not None:
-            self.log.debug('Stopping submit_sm_q consumer in connector [%s]', cid)
+            self.log.debug(f'Stopping submit_sm_q consumer in connector [{cid}]')
             yield self.amqpBroker.chan.basic_cancel(consumer_tag=connector['consumer_tag'])
 
-            # Cleaning
-            self.log.debug('Cleaning objects in connector [%s]', cid)
             connector['submit_sm_q'] = None
             connector['consumer_tag'] = None
 
         if connector['service'].running == 0:
-            self.log.error('Connector [%s] is already stopped.', cid)
+            self.log.error(f'Connector [{cid}] is already stopped.')
             defer.returnValue(False)
 
+        # Delete queues if requested
         if delQueues:
-            submitSmQueueName = 'submit.sm.%s' % cid
-            self.log.debug('Deleting queue [%s]', submitSmQueueName)
+            submitSmQueueName = f'submit.sm.{cid}'
+            self.log.debug(f'Deleting queue [{submitSmQueueName}]')
             yield self.amqpBroker.chan.queue_delete(queue=submitSmQueueName)
 
-        # Reject & requeue any pending message to avoid loosing messages after
-        # clearing timers
-        if len(connector['sm_listener'].rejectTimers) > 0:
+        # Reject & requeue any pending messages before stopping
+        if connector['sm_listener'].rejectTimers:
             for msgid, timer in list(connector['sm_listener'].rejectTimers.items()):
                 if timer.active():
                     func = timer.func
@@ -447,141 +413,117 @@ class SMPPClientManagerPB(pb.Avatar):
                     timer.cancel()
                     del connector['sm_listener'].rejectTimers[msgid]
 
-                    self.log.debug('Rejecting/requeuing msgid [%s] before stopping connector', msgid)
+                    self.log.debug(f'Rejecting/requeuing msgid [{msgid}] before stopping connector')
                     yield func(**kw)
 
-        # Stop timers in message listeners
-        self.log.debug('Clearing sm_listener timers in connector [%s]', cid)
+        # Clear timers
+        self.log.debug(f'Clearing sm_listener timers in connector [{cid}]')
         connector['sm_listener'].clearAllTimers()
         connector['sm_listener'].submit_sm_q = None
 
-        # Stop SMPP connector
         connector['service'].stopService()
+        self.log.info(f'Stopped connector [{cid}]')
 
-        self.log.info('Stopped connector [%s]', cid)
-
-        # Set persistance state to False (pending for persistance)
         self.persisted = False
-
         defer.returnValue(True)
 
     @defer.inlineCallbacks
     def perspective_connector_stopall(self, delQueues=False):
-        """This will stop all services by detaching IService to IServiceCollection
         """
-
+        Stop all connector services.
+        """
         self.log.debug('Stopping all connectors')
 
         for connector in self.connectors:
             yield self.perspective_connector_stop(connector['id'], delQueues)
 
-        # Set persistance state to False (pending for persistance)
         self.persisted = False
-
         defer.returnValue(True)
 
     def perspective_service_status(self, cid):
-        """This will return the IService running status
         """
-
-        self.log.debug('Requested service status %s', cid)
-
+        Return the running status of a connector's service.
+        """
+        self.log.debug(f'Requested service status {cid}')
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to get service status of a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             return False
 
         service_status = connector['service'].running
-        self.log.info('Connector [%s] service status is: %s', cid, str(service_status))
-
+        self.log.info(f'Connector [{cid}] service status is: {service_status}')
         return service_status
 
     def perspective_session_state(self, cid):
-        """This will return the session state of a client connector
         """
-
-        self.log.debug('Requested session state for connector [%s]', cid)
+        Return the session state of a client connector.
+        """
+        self.log.debug(f'Requested session state for connector [{cid}]')
 
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to get session state of a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             return False
 
         session_state = connector['service'].SMPPClientFactory.getSessionState()
-        self.log.info('Connector [%s] session state is: %s', cid, session_state)
+        self.log.info(f'Connector [{cid}] session state is: {session_state}')
 
         if session_state is None:
             return None
         else:
-            # returning Enum would raise this on the client side:
-            # Unpersistable data: instance of class enum.EnumValue deemed insecure
-            # So we just return back the string of it
             return session_state.name
 
     def perspective_connector_details(self, cid):
-        """This will return the connector details
         """
-
-        self.log.debug('Requested details for connector [%s]', cid)
+        Return the connector details.
+        """
+        self.log.debug(f'Requested details for connector [{cid}]')
 
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to get details of a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             return False
 
         return self.getConnectorDetails(cid)
 
     def perspective_connector_config(self, cid):
-        """This will return the connector SMPPClientConfig object
         """
-
-        self.log.debug('Requested config for connector [%s]', cid)
+        Return the connector SMPPClientConfig object.
+        """
+        self.log.debug(f'Requested config for connector [{cid}]')
 
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to get config of a connector with an unknown cid: %s', cid)
+            self.log.error(f'Unknown connector cid: {cid}')
             return False
 
         return pickle.dumps(connector['config'], self.pickleProtocol)
 
     @defer.inlineCallbacks
-    def perspective_submit_sm(self, uid, cid, SubmitSmPDU, submit_sm_bill, priority=1, validity_period=None,
-                              pickled=True, dlr_url=None, dlr_level=1, dlr_method='POST', dlr_connector=None,
-                              source_connector='httpapi'):
-        """This will enqueue a submit_sm to a connector
+    def perspective_submit_sm(self, uid, cid, SubmitSmPDU, submit_sm_bill,
+                              priority=1, validity_period=None,
+                              pickled=True, dlr_url=None, dlr_level=1, dlr_method='POST',
+                              dlr_connector=None, source_connector='httpapi'):
+        """
+        Enqueue a submit_sm to a connector.
         """
         connector = self.getConnector(cid)
         if connector is None:
-            self.log.error('Trying to enqueue a SUBMIT_SM to a connector with an unknown cid: %s', cid)
-            defer.returnValue(False)
-        if self.amqpBroker is None:
-            self.log.error('AMQP Broker is not added')
-            defer.returnValue(False)
-        if self.amqpBroker is None:
-            self.log.error('Trying to enqueue a SUBMIT_SM when no broker were added')
+            self.log.error(f'Unknown connector cid: {cid}')
             defer.returnValue(False)
 
-        # TODO: Future implementation, submitting a sm to a disconnected broker would be possible
-        #    through a local in memory queue
-        if self.amqpBroker.connected == False:
-            self.log.error('AMQP Broker is not connected')
+        if not self._check_amqp_broker():
             defer.returnValue(False)
 
-        # Define the destination and response queue names
-        pubQueueName = "submit.sm.%s" % cid
-        responseQueueName = "submit.sm.resp.%s" % cid
+        # If not pickled, we must pickle now
+        PickledSubmitSmPDU = SubmitSmPDU if pickled else pickle.dumps(SubmitSmPDU, self.pickleProtocol)
+        if submit_sm_bill is not None and not pickled:
+            submit_sm_bill = pickle.dumps(submit_sm_bill, self.pickleProtocol)
 
-        # Pickle SubmitSmPDU if it's not pickled
-        if not pickled:
-            PickledSubmitSmPDU = pickle.dumps(SubmitSmPDU, self.pickleProtocol)
-            if submit_sm_bill is not None:
-                submit_sm_bill = pickle.dumps(submit_sm_bill, self.pickleProtocol)
-        else:
-            PickledSubmitSmPDU = SubmitSmPDU
-            SubmitSmPDU = pickle.loads(PickledSubmitSmPDU)
+        pubQueueName = f"submit.sm.{cid}"
+        responseQueueName = f"submit.sm.resp.{cid}"
 
-        # Publishing a pickled PDU
-        self.log.debug('Publishing SubmitSmPDU with routing_key=%s, priority=%s', pubQueueName, priority)
+        self.log.debug(f'Publishing SubmitSmPDU with routing_key={pubQueueName}, priority={priority}')
         c = SubmitSmContent(
             uid=uid,
             body=PickledSubmitSmPDU,
@@ -590,61 +532,87 @@ class SMPPClientManagerPB(pb.Avatar):
             priority=priority,
             expiration=validity_period,
             source_connector='httpapi' if source_connector == 'httpapi' else 'smppsapi',
-            destination_cid=cid)
+            destination_cid=cid
+        )
         yield self.amqpBroker.publish(exchange='messaging', routing_key=pubQueueName, content=c)
 
-        if source_connector == 'httpapi' and dlr_url is not None:
-            # Enqueue DLR request in redis 'dlr' key if it is a httpapi request
-            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
-                self.log.warning("DLR is not enqueued for SubmitSmPDU [msgid:%s], RC is not connected.",
-                              c.properties['message-id'])
-            else:
-                self.log.debug('Setting DLR url (%s) and level (%s) for message id:%s, expiring in %s',
-                               dlr_url,
-                               dlr_level,
-                               c.properties['message-id'],
-                               connector['config'].dlr_expiry)
-                # Set values and callback expiration setting
-                hashKey = "dlr:%s" % (c.properties['message-id'])
-                hashValues = {'sc': 'httpapi',
-                              'url': dlr_url,
-                              'level': dlr_level,
-                              'method': dlr_method,
-                              'connector': dlr_connector,
-                              'expiry': connector['config'].dlr_expiry}
-                self.redisClient.hmset(hashKey, hashValues).addCallback(
-                    lambda response: self.redisClient.expire(
-                        hashKey, connector['config'].dlr_expiry))
-        elif (isinstance(source_connector, SMPPServerProtocol) and
-              SubmitSmPDU.params['registered_delivery'].receipt != RegisteredDeliveryReceipt.NO_SMSC_DELIVERY_RECEIPT_REQUESTED):
-            # If submit_sm is successfully sent from a SMPPServerProtocol connector and DLR is
-            # requested, then map message-id to the source_connector to permit related deliver_sm
-            # messages holding further receipts to be sent back to the right connector
-            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
-                self.log.warning("SMPPs mapping is not done for SubmitSmPDU [msgid:%s], RC is not connected.",
-                              c.properties['message-id'])
-            else:
-                self.log.debug(
-                    'Setting SMPPs connector (%s) mapping for msgid:%s, registered_dlr: %s, expiring in %s',
-                    source_connector.system_id,
-                    c.properties['message-id'],
-                    SubmitSmPDU.params['registered_delivery'],
-                    source_connector.factory.config.dlr_expiry)
-                # Set values and callback expiration setting
-                hashKey = "dlr:%s" % (c.properties['message-id'])
-                hashValues = {'sc': 'smppsapi',
-                              'system_id': source_connector.system_id,
-                              'source_addr_ton': SubmitSmPDU.params['source_addr_ton'],
-                              'source_addr_npi': SubmitSmPDU.params['source_addr_npi'],
-                              'source_addr': SubmitSmPDU.params['source_addr'],
-                              'dest_addr_ton': SubmitSmPDU.params['dest_addr_ton'],
-                              'dest_addr_npi': SubmitSmPDU.params['dest_addr_npi'],
-                              'destination_addr': SubmitSmPDU.params['destination_addr'],
-                              'sub_date': datetime.datetime.now(),
-                              'rd_receipt': SubmitSmPDU.params['registered_delivery'].receipt,
-                              'expiry': source_connector.factory.config.dlr_expiry}
-                self.redisClient.hmset(hashKey, hashValues).addCallback(
-                    lambda response: self.redisClient.expire(
-                        hashKey, source_connector.factory.config.dlr_expiry))
+        # Handle DLR or SMPPs mapping
+        yield self._handle_submit_sm_dlr(c, dlr_url, dlr_level, dlr_method, dlr_connector,
+                                         source_connector, SubmitSmPDU, connector)
 
         defer.returnValue(c.properties['message-id'])
+
+    def _check_amqp_broker(self):
+        """Check if AMQP broker is set and connected."""
+        if self.amqpBroker is None:
+            self.log.error('AMQP Broker is not added')
+            return False
+        if not self.amqpBroker.connected:
+            self.log.error('AMQP Broker channel is not yet ready')
+            return False
+        return True
+
+    @defer.inlineCallbacks
+    def _remove_all_connectors(self):
+        """Remove all connectors before loading a profile."""
+        CIDs = [c['id'] for c in self.connectors]
+        for cid in CIDs:
+            remRet = yield self.perspective_connector_remove(cid)
+            if not remRet:
+                raise ConfigProfileLoadingError(f'Error removing connector {cid}')
+            self.log.info(f'Removed connector [{cid}]')
+
+    @defer.inlineCallbacks
+    def _handle_submit_sm_dlr(self, c, dlr_url, dlr_level, dlr_method, dlr_connector,
+                              source_connector, SubmitSmPDU, connector):
+        """
+        Handle DLR enqueueing or SMPPs mapping depending on source_connector.
+        """
+        msgid = c.properties['message-id']
+
+        if source_connector == 'httpapi' and dlr_url is not None:
+            # Enqueue DLR request in redis if available
+            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
+                self.log.warning(f"DLR not enqueued for message id:{msgid}, RC is not connected.")
+            else:
+                self.log.debug(
+                    f'Setting DLR url ({dlr_url}) and level ({dlr_level}) for message id:{msgid}, expiring in {connector["config"].dlr_expiry}'
+                )
+                hashKey = f"dlr:{msgid}"
+                hashValues = {
+                    'sc': 'httpapi',
+                    'url': dlr_url,
+                    'level': dlr_level,
+                    'method': dlr_method,
+                    'connector': dlr_connector,
+                    'expiry': connector['config'].dlr_expiry
+                }
+                yield self.redisClient.hmset(hashKey, hashValues)
+                yield self.redisClient.expire(hashKey, connector['config'].dlr_expiry)
+        elif (isinstance(source_connector, SMPPServerProtocol) and
+              SubmitSmPDU.params['registered_delivery'].receipt != RegisteredDeliveryReceipt.NO_SMSC_DELIVERY_RECEIPT_REQUESTED):
+            # SMPPs mapping if DLR is requested
+            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
+                self.log.warning(f"SMPPs mapping not done for message id:{msgid}, RC is not connected.")
+            else:
+                self.log.debug(
+                    f'Setting SMPPs connector ({source_connector.system_id}) mapping for msgid:{msgid}, '
+                    f'rd:{SubmitSmPDU.params["registered_delivery"]}, expiring in {source_connector.factory.config.dlr_expiry}'
+                )
+
+                hashKey = f"dlr:{msgid}"
+                hashValues = {
+                    'sc': 'smppsapi',
+                    'system_id': source_connector.system_id,
+                    'source_addr_ton': SubmitSmPDU.params['source_addr_ton'],
+                    'source_addr_npi': SubmitSmPDU.params['source_addr_npi'],
+                    'source_addr': SubmitSmPDU.params['source_addr'],
+                    'dest_addr_ton': SubmitSmPDU.params['dest_addr_ton'],
+                    'dest_addr_npi': SubmitSmPDU.params['dest_addr_npi'],
+                    'destination_addr': SubmitSmPDU.params['destination_addr'],
+                    'sub_date': datetime.datetime.now(),
+                    'rd_receipt': SubmitSmPDU.params['registered_delivery'].receipt,
+                    'expiry': source_connector.factory.config.dlr_expiry
+                }
+                yield self.redisClient.hmset(hashKey, hashValues)
+                yield self.redisClient.expire(hashKey, source_connector.factory.config.dlr_expiry)

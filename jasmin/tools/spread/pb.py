@@ -8,65 +8,69 @@ from twisted.cred.error import UnhandledCredentials, UnauthorizedLogin
 
 class _JellyableAvatarMixin:
     """
-    Helper class for code which deals with avatars which PB must be capable of
-    sending to a peer.
+    A helper mixin for PB avatars that ensures the returned avatar is
+    jellyable and handles disconnection notifications for logout.
     """
 
     def _cb_login(self, result):
         """
-        Ensure that the avatar to be returned to the client is jellyable and
-        set up disconnection notification to call the realm's logout object.
+        Called on successful portal.login().
+
+        Ensures avatar is jellyable, arranges for logout to be called
+        once (whether on disconnect or explicit logout), and tracks the avatar
+        with the broker.
         """
         (interface, avatar, logout) = result
 
         if not IJellyable.providedBy(avatar):
+            # Make sure the avatar is referenceable over PB
             avatar = AsReferenceable(avatar, "perspective")
 
         puid = avatar.processUniqueID()
 
-        # only call logout once, whether the connection is dropped (disconnect)
-        # or a logout occurs (cleanup), and be careful to drop the reference to
-        # it in either case
-        logout = [logout]
+        # Wrap logout so it's only called once.
+        logout_ref = [logout]
 
         def maybeLogout():
-            if not logout:
-                return
-            fn = logout[0]
-            del logout[0]
-            fn()
+            if logout_ref:
+                fn = logout_ref.pop()
+                fn()
 
+        # Ensure logout is called on disconnect or explicit logout
         self.broker._localCleanup[puid] = maybeLogout
         self.broker.notifyOnDisconnect(maybeLogout)
 
         return avatar
 
     def _login_error(self, err, username='Anonymous'):
+        """
+        Called when login fails. Transforms known exceptions into a tuple
+        of (success=False, message) and logs appropriately.
+        """
         if err.type == UnhandledCredentials:
             if str(err.value) == 'No checker for twisted.cred.credentials.IAnonymous':
-                self.log.info('Anonymous connection is not authorized !')
-                return False, 'Anonymous connection is not authorized !'
+                self.log.info('Anonymous connection is not authorized!')
+                return False, 'Anonymous connection is not authorized!'
             else:
-                self.log.info('Authentication error: %s', username)
-                return False, 'Authentication error: %s' % username
+                self.log.info('Authentication error for user: %s', username)
+                return False, f'Authentication error: {username}'
         elif err.type == UnauthorizedLogin:
-            self.log.info('Authentication error %s', username)
-            return False, 'Authentication error %s' % username
+            self.log.info('Authentication error for user: %s', username)
+            return False, f'Authentication error: {username}'
         else:
-            # Fallback solution when err is not known
+            # Unknown error
             self.log.error('Unknown authentication error: %s', err)
-            return False, 'Unknown authentication error: %s' % err
+            return False, f'Unknown authentication error: {err}'
 
 
 @implementer(IUsernameHashedPassword)
 class _PortalAuthVerifier(Referenceable, _JellyableAvatarMixin):
     """
-    Called with response to verify received password (self.response) with
-    the saved md5 digested password.
+    Used in the login sequence to verify a hashed password.
 
-    This is slightly different from twisted.spread.pb._PortalAuthChallenger in a way
-    where the checker is holding md5 digest passwords (no plaintext passwords on server
-    side).
+    This differs from twisted.spread.pb._PortalAuthChallenger in that the server
+    holds MD5 digested passwords (no plaintext), and we verify by recomputing the
+    MD5 hash with the challenge and comparing to the received response.
     """
 
     def __init__(self, portal, broker, username, _challenge):
@@ -75,10 +79,15 @@ class _PortalAuthVerifier(Referenceable, _JellyableAvatarMixin):
         self.username = username
         self.challenge = _challenge
 
-        # Will use the PBFactory's logger
+        # Use the PBFactory's logger from the realm
         self.log = self.portal.realm.PBFactory.log
 
     def remote_respond(self, response, mind):
+        """
+        Called by the client with their response to the challenge.
+        On success, portal.login() returns a deferred that upon callback,
+        we transform using _cb_login to return a jellyable avatar.
+        """
         self.response = response
         d = self.portal.login(self, mind, IPerspective)
         d.addCallback(self._cb_login)
@@ -86,28 +95,34 @@ class _PortalAuthVerifier(Referenceable, _JellyableAvatarMixin):
         return d
 
     def checkPassword(self, md5password):
-        md = md5()
-        md.update(md5password)
-        md.update(self.challenge)
-        correct = md.digest()
+        """
+        Verifies the provided MD5 hashed password by recomputing
+        MD5 with the challenge and comparing to the client's response.
+        """
+        hasher = md5()
+        hasher.update(md5password)
+        hasher.update(self.challenge)
+        correct = hasher.digest()
         return self.response == correct
 
 
 class _PortalWrapper(Referenceable, _JellyableAvatarMixin):
     """
-    Root Referenceable object, used to login to portal.
+    Root Referenceable object used to initiate the login process through the portal.
     """
 
     def __init__(self, portal, broker):
         self.portal = portal
         self.broker = broker
 
-        # Will use the PBFactory's logger
+        # Use the PBFactory's logger from the realm
         self.log = self.portal.realm.PBFactory.log
 
     def remote_login(self, username):
         """
-        Start of username/password login.
+        Initiates a username/password login challenge.
+
+        Returns a challenge and an _PortalAuthVerifier to handle the response.
         """
         c = challenge()
         return c, _PortalAuthVerifier(self.portal, self.broker, username, c)
@@ -116,12 +131,8 @@ class _PortalWrapper(Referenceable, _JellyableAvatarMixin):
         """
         Attempt an anonymous login.
 
-        @param mind: An object to use as the mind parameter to the portal login
-            call (possibly None).
-
-        @rtype: L{Deferred}
-        @return: A Deferred which will be called back with an avatar when login
-            succeeds or which will be errbacked if login fails somehow.
+        Returns a deferred that fires with a jellyable avatar on success,
+        or an error tuple on failure.
         """
         d = self.portal.login(Anonymous(), mind, IPerspective)
         d.addCallback(self._cb_login)
@@ -131,9 +142,17 @@ class _PortalWrapper(Referenceable, _JellyableAvatarMixin):
 
 @implementer(IPBRoot)
 class JasminPBPortalRoot:
+    """
+    Root object that PB uses to get the initial Referenceable which is an instance
+    of _PortalWrapper, enabling the login process.
+    """
 
     def __init__(self, portal):
         self.portal = portal
 
     def rootObject(self, broker):
+        """
+        Called by PB when a connection is made to get the root object.
+        Returns an instance of _PortalWrapper to handle login requests.
+        """
         return _PortalWrapper(self.portal, broker)
