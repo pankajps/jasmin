@@ -177,7 +177,7 @@ You should have the following containers up and running::
     cd7597137e9a   grafana/grafana          "/run.sh"                2 days ago    Up About a minute   0.0.0.0:3000->3000/tcp                                                    jasmin-grafana-1
     bd3be30a5cd5   prom/prometheus:latest   "/bin/prometheus --c…"   2 days ago    Up About a minute   9090/tcp                                                                  jasmin-prometheus-1
     8209435c2f8d   jasmin-jasmin            "/docker-entrypoint.…"   2 days ago    Up About a minute   0.0.0.0:1401->1401/tcp, 0.0.0.0:2775->2775/tcp, 0.0.0.0:8990->8990/tcp    jasmin
-    6c88fa5e47db   rabbitmq:alpine          "docker-entrypoint.s…"   2 days ago    Up About a minute   4369/tcp, 5671-5672/tcp, 15691-15692/tcp, 25672/tcp                       jasmin-rabbit-mq-1
+    6c88fa5e47db   rabbitmq:alpine          "docker-entrypoint.s…"   2 days ago    Up About a minute   4369/tcp, 5671-5672/tcp, 15691-15692/tcp, 25672/tcp                       jasmin-rabbitmq-1
     a649abd164c8   redis:alpine             "docker-entrypoint.s…"   2 days ago    Up About a minute   6379/tcp                                                                  jasmin-redis-1
 
 Now open Grafana using default username (admin) and password (admin)::

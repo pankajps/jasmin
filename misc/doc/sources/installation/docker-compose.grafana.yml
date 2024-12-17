@@ -14,7 +14,7 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  rabbit-mq:
+  rabbitmq:
     image: rabbitmq:3.10-management-alpine
     restart: unless-stopped
     healthcheck:
@@ -85,11 +85,11 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      rabbit-mq:
+      rabbitmq:
         condition: service_healthy
     environment:
       REDIS_CLIENT_HOST: redis
-      AMQP_BROKER_HOST: rabbit-mq
+      AMQP_BROKER_HOST: rabbitmq
     deploy:
       resources:
         limits:

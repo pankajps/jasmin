@@ -62,21 +62,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  postgres:
-    build:
-      context: .
-      dockerfile: ./compose/production/postgres/Dockerfile
-    image: jasmin:postgres
-    container_name: postgres
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - postgres_data_backups:/backups
-    env_file:
-      - ./.envs/.production/.postgres
-    networks:
-      - jasmin
-
-
   jasmin:
     build:
       context: ./
@@ -209,6 +194,20 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  postgres:
+    build:
+      context: .
+      dockerfile: ./compose/production/postgres/Dockerfile
+    image: jasmin:postgres
+    container_name: postgres
+    volumes:
+      - production_postgres_data:/var/lib/postgresql/data
+      - production_postgres_data_backups:/backups
+    env_file:
+      - ./.envs/.local/.postgres
+    networks:
+      - jasmin
+
 networks:
   default:
     name: jasmin
@@ -223,7 +222,5 @@ volumes:
   restapi_logs:
   rabbitmq:
   redis:
-  postgres_data: {}
-  postgres_data_backups: {}
   grafana_data:
   monitoring_data:
