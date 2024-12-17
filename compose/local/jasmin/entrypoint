@@ -57,5 +57,7 @@ if [ "${2:-}" = "--enable-interceptor-client" ]; then
   fi
 fi
 
+# Start Jasmin
 echo 'Starting jasmind with arguments: '"$*"
 exec "$@"
+

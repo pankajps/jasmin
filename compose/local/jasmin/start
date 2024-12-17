@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Set default values for environment variables if not provided
+: "${JCLI_ADMIN:=jcliadmin}"
+: "${JCLI_PWD:=jclipwd}"
+
+# Start Jasmin
+exec jasmind.py --enable-interceptor-client --enable-dlr-thrower --enable-dlr-lookup -u "$JCLI_ADMIN" -p "$JCLI_PWD"

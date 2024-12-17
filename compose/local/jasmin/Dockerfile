@@ -12,7 +12,9 @@ ENV RESTAPI_MODE=0 \
     RESOURCE_PATH=/etc/jasmin/resource \
     STORE_PATH=/etc/jasmin/store \
     LOG_PATH=/var/log/jasmin \
-    UNICODEMAP_JP=unicode-ascii
+    UNICODEMAP_JP=unicode-ascii \
+    JCLI_ADMIN=jcliadmin \
+    JCLI_PWD=jclipwd
 
 # Install system dependencies and create jasmin user
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -77,8 +79,11 @@ EXPOSE 2775 8990 1401 8080
 # VOLUME ["/var/log/jasmin", "/etc/jasmin", "/etc/jasmin/store"]
 
 # Copy the entrypoint script and set execute permissions
-COPY docker/restapi-docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+COPY ./compose/local/jasmin/entrypoint /entrypoint
+RUN sed -i 's/\r$//g' /entrypoint && chmod +x /entrypoint
+
+COPY ./compose/local/jasmin/start /start
+RUN sed -i 's/\r$//g' /start && chmod +x /start
 
 
 #RUN mkdir -p "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
@@ -88,5 +93,6 @@ RUN chmod +x /docker-entrypoint.sh
 #USER jasmin
 
 # Define the entrypoint and default command
-ENTRYPOINT ["/docker-entrypoint.sh"]
+ENTRYPOINT ["/entrypoint"]
+
 CMD ["jasmind.py", "--enable-interceptor-client", "--enable-dlr-thrower", "--enable-dlr-lookup", "-u", "jcliadmin", "-p", "jclipwd"]
