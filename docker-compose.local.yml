@@ -1,7 +1,8 @@
+version: "3.9"
+
 services:
   redis:
     image: redis:7.4.1-alpine
-    container_name: redis
     restart: unless-stopped
     volumes:
       - redis:/data
@@ -16,10 +17,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.2'
+          cpus: "0.2"
           memory: 128M
         reservations:
-          cpus: '0.1'
+          cpus: "0.1"
           memory: 64M
     security_opt:
       - no-new-privileges:true
@@ -31,7 +32,6 @@ services:
 
   rabbitmq:
     image: rabbitmq:4.0.4-management-alpine
-    container_name: rabbitmq
     restart: unless-stopped
     volumes:
       - rabbitmq:/var/lib/rabbitmq
@@ -46,16 +46,55 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 525M
         reservations:
-          cpus: '0.2'
+          cpus: "0.2"
           memory: 256M
     security_opt:
       - no-new-privileges:true
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:-guest}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:-guest}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    build:
+      context: .
+      dockerfile: ./compose/production/postgres/Dockerfile
+    image: jasmin:postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_backups:/backups
+    env_file:
+      - ./.envs/.local/.postgres
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-jasmin_local}"
+      POSTGRES_USER: "${POSTGRES_USER:-debug}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-debug}"
+    networks:
+      - jasmin
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "1G"
+        reservations:
+          cpus: "0.5"
+          memory: "512M"
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
@@ -67,18 +106,17 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.restapi.alpine
     image: jasmin:local
-    container_name: jasmin
     restart: unless-stopped
     ports:
       - "${FORWARD_JASMIN_SMPP_PORT:-2775}:2775"
       - "${FORWARD_JASMIN_CLI_PORT:-8990}:8990"
       - "${FORWARD_JASMIN_HTTP_PORT:-1401}:1401"
-      - '${FORWARD_JASMIN_RESTAPI_PORT:-8080}:8080'
+      - "${FORWARD_JASMIN_RESTAPI_PORT:-8080}:8080"
     volumes:
-      - ./misc/config:/etc/jasmin:rwx
-      - ./misc/config/store:/etc/jasmin/store:rwx
-      - ./misc/config/resource:/etc/jasmin/resource:rwx
-      - ./misc/logs:/var/log/jasmin:rwx
+      - ./misc/config:/etc/jasmin:rw
+      - ./misc/config/store:/etc/jasmin/store:rw
+      - ./misc/config/resource:/etc/jasmin/resource:rw
+      - ./misc/logs:/var/log/jasmin:rw
     tmpfs:
       - /tmp
     networks:
@@ -88,6 +126,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       REDIS_CLIENT_HOST: "${REDIS_CLIENT_HOST:-redis}"
       REDIS_CLIENT_PORT: "${REDIS_CLIENT_PORT:-6379}"
@@ -95,15 +135,15 @@ services:
       AMQP_BROKER_PORT: "${AMQP_BROKER_PORT:-5672}"
       ENABLE_PUBLISH_SUBMIT_SM_RESP: "${ENABLE_PUBLISH_SUBMIT_SM_RESP:-1}"
       RESTAPI_MODE: "${RESTAPI_MODE:-1}"
-      RESTAPI_OLD_HTTP_HOST: ${RESTAPI_OLD_HTTP_HOST:-127.0.0.1}
+      RESTAPI_OLD_HTTP_HOST: "${RESTAPI_OLD_HTTP_HOST:-127.0.0.1}"
     deploy:
       resources:
         limits:
-          cpus: '1'
+          cpus: "1"
           memory: 256M
         reservations:
-          cpus: '0.5'
-          memory: 128M
+          cpus: "0.5"
+          memory: "128M"
     security_opt:
       - no-new-privileges:true
     logging:
@@ -114,10 +154,9 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.0.1
-    container_name: prometheus
     restart: unless-stopped
     volumes:
-      - ./docker/prometheus/config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./docker/prometheus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - monitoring_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -128,7 +167,7 @@ services:
     depends_on:
       - jasmin
     ports:
-      - 9090:9090
+      - "9090:9090"
     networks:
       - jasmin
     security_opt:
@@ -136,11 +175,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 512M
         reservations:
-          cpus: '0.2'
-          memory: 256M
+          cpus: "0.2"
+          memory: "256M"
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://localhost:9090/-/ready"]
       interval: 30s
@@ -155,10 +194,9 @@ services:
 
   grafana:
     image: grafana/grafana:11.3.1
-    container_name: grafana
     restart: unless-stopped
     ports:
-      - 3000:3000
+      - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: "${GF_SECURITY_ADMIN_USER:-admin}"
       GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:-admin}"
@@ -177,11 +215,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: "0.5"
           memory: 512M
         reservations:
-          cpus: '0.2'
-          memory: 256M
+          cpus: "0.2"
+          memory: "256M"
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://localhost:3000/api/health"]
       interval: 30s
@@ -194,33 +232,16 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  postgres:
-    build:
-      context: .
-      dockerfile: ./compose/production/postgres/Dockerfile
-    image: jasmin:postgres
-    container_name: postgres
-    volumes:
-      - production_postgres_data:/var/lib/postgresql/data
-      - production_postgres_data_backups:/backups
-    env_file:
-      - ./.envs/.local/.postgres
-    networks:
-      - jasmin
-
 networks:
-  default:
-    name: jasmin
   jasmin:
     driver: bridge
     name: jasmin
+    external: true
 
 volumes:
-  jasmin_config:
-  jasmin_store:
-  jasmin_logs:
-  restapi_logs:
-  rabbitmq:
   redis:
+  rabbitmq:
+  postgres_data:
+  postgres_data_backups:
   grafana_data:
   monitoring_data:
