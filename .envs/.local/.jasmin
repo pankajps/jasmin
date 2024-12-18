@@ -1,4 +1,16 @@
-# General
-# ------------------------------------------------------------------------------
 JCLI_ADMIN=jcliadmin
 JCLI_PWD=jclipwd
+CONFIG_PATH=/etc/jasmin
+REDIS_CLIENT_HOST=redis
+REDIS_CLIENT_PORT=6379
+AMQP_BROKER_HOST=localhost
+AMQP_BROKER_PORT=5672
+RESTAPI_MODE=0
+RESTAPI_OLD_HTTP_HOST=127.0.0.1
+ENABLE_PUBLISH_SUBMIT_SM_RESP=1
+ROOT_PATH=/
+CONFIG_PATH=/etc/jasmin
+RESOURCE_PATH=/etc/jasmin/resource
+STORE_PATH=/etc/jasmin/store
+LOG_PATH=/var/log/jasmin
+UNICODEMAP_JP=unicode-ascii

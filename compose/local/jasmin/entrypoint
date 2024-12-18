@@ -8,7 +8,7 @@ set -euo pipefail
 : "${AMQP_BROKER_HOST:=localhost}"
 : "${AMQP_BROKER_PORT:=5672}"
 : "${RESTAPI_MODE:=0}"
-: "${RESTAPI_OLD_HTTP_HOST:=localhost}"
+: "${RESTAPI_OLD_HTTP_HOST:=127.0.0.1}"
 : "${ENABLE_PUBLISH_SUBMIT_SM_RESP:=1}"
 
 CONFIG_FILE="${CONFIG_PATH}/jasmin.cfg"
@@ -40,10 +40,10 @@ else
   # Update publish_submit_sm_resp setting
   if [ "$ENABLE_PUBLISH_SUBMIT_SM_RESP" = "1" ]; then
     echo 'Enabling publish_submit_sm_resp in jasmin.cfg'
-    sed -i "s/^.*publish_submit_sm_resp\s*=.*/publish_submit_sm_resp = True/" "$CONFIG_FILE"
+    update_config "sm-listener" "publish_submit_sm_resp" "True"
   else
     echo 'Disabling publish_submit_sm_resp in jasmin.cfg'
-    sed -i "s/^.*publish_submit_sm_resp\s*=.*/publish_submit_sm_resp = False/" "$CONFIG_FILE"
+    update_config "sm-listener" "publish_submit_sm_resp" "False"
   fi
 fi
 
@@ -57,7 +57,16 @@ if [ "${2:-}" = "--enable-interceptor-client" ]; then
   fi
 fi
 
-# Start Jasmin
-echo 'Starting jasmind with arguments: '"$*"
-exec "$@"
+# Replace placeholders in CMD arguments with actual environment variable values
+CMD_ARGS=()
+for arg in "$@"; do
+  # Replace ${JCLI_ADMIN} with actual value
+  arg=${arg//\$\{JCLI_ADMIN\}/$JCLI_ADMIN}
+  # Replace ${JCLI_PWD} with actual value
+  arg=${arg//\$\{JCLI_PWD\}/$JCLI_PWD}
+  CMD_ARGS+=("$arg")
+done
+
+echo 'Starting jasmind with arguments: '"${CMD_ARGS[*]}"
+exec "${CMD_ARGS[@]}"
 

@@ -1,39 +1,54 @@
-# Use the official Python slim Debian-based image
-FROM python:3.12.8-slim-bookworm
+# define an alias for the specific python version used in this file.
+FROM docker.io/python:3.12.8-slim-bookworm AS python
 
-LABEL maintainer="Jookies LTD <jasmin@jookies.net>"
+# Python build stage
+FROM python AS python-build-stage
 
-# Set environment variables
-ENV RESTAPI_MODE=0 \
-    RESTAPI_OLD_HTTP_HOST="127.0.0.1" \
-    ENABLE_PUBLISH_SUBMIT_SM_RESP=0 \
-    ROOT_PATH=/ \
-    CONFIG_PATH=/etc/jasmin \
-    RESOURCE_PATH=/etc/jasmin/resource \
-    STORE_PATH=/etc/jasmin/store \
-    LOG_PATH=/var/log/jasmin \
-    UNICODEMAP_JP=unicode-ascii \
-    JCLI_ADMIN=jcliadmin \
-    JCLI_PWD=jclipwd
+ARG BUILD_ENVIRONMENT=production
 
-# Install system dependencies and create jasmin user
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc \
-        libffi-dev \
-        libssl-dev \
-        python3-dev \
-        python3-pip \
-        git \
-        bash \
-        sed \
-    && addgroup --system jasmin \
-    && adduser --system --ingroup jasmin jasmin \
-    && mkdir -p "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
-    && chown -R jasmin:jasmin "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
+# Install apt packages required only for building wheels
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Requirements are installed here to ensure they will be cached.
+COPY ./requirements .
+
+RUN pip wheel --wheel-dir /usr/src/app/wheels -r ${BUILD_ENVIRONMENT}.txt
+
+# Python 'run' stage
+FROM python AS python-run-stage
+
+ARG BUILD_ENVIRONMENT=local
+ARG APP_HOME=/app
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV BUILD_ENV=${BUILD_ENVIRONMENT}
+
+WORKDIR ${APP_HOME}
+
+# Install devcontainer dependencies and utils
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    sudo git bash-completion nano ssh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create devcontainer user and add it to sudoers
+RUN groupadd --gid 1000 jasmin \
+    && useradd --uid 1000 --gid jasmin --shell /bin/bash --create-home jasmin \
+    && echo jasmin ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/jasmin \
+    && chmod 0440 /etc/sudoers.d/jasmin
+
+# Install required system dependencies
+RUN apt-get update && apt-get install --no-install-recommends -y \
+    gcc \
+    libffi-dev \
+    libssl-dev \
+    libpq-dev sed gettext \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
 
 # Upgrade pip to the latest version
 RUN pip install --no-cache-dir --upgrade pip
@@ -45,38 +60,41 @@ RUN pip install --no-cache-dir \
         -e git+https://github.com/jookies/smpp.pdu.git@master#egg=smpp.pdu3 \
         -e git+https://github.com/jookies/smpp.twisted.git@master#egg=smpp.twisted3
 
+# copy python dependency wheels from python-build-stage
+COPY --from=python-build-stage /usr/src/app/wheels /wheels/
+
+# Install python deps from wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels/ /wheels/*
+
 # Copy application code
 COPY . .
 
 # Install the application
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . --find-links=/wheels/ \
+  && rm -rf /wheels/
 
-# Perform sed operations to update REST API configuration as root
-RUN if [ "$RESTAPI_MODE" = "1" ]; then \
-        jasmin_root=$(python -c "import jasmin; print(jasmin.__path__[0])") && \
-        CONFIG_PY="${jasmin_root}/protocols/rest/config.py" && \
-        sed -i "s|^\(.*old_api_uri\s*=\s*\).*|\1'http://$RESTAPI_OLD_HTTP_HOST:1401'|" "$CONFIG_PY" && \
-        sed -i "s|^\(.*broker_url\s*=\s*\).*|\1'amqp://guest:guest@$AMQP_BROKER_HOST:$AMQP_BROKER_PORT//'|" "$CONFIG_PY" && \
-        sed -i "s|^\(.*result_backend\s*=\s*\).*|\1'redis://@$REDIS_CLIENT_HOST:$REDIS_CLIENT_PORT/1'|" "$CONFIG_PY"; \
-    fi
-
-# Install Gunicorn for REST API mode
-RUN pip install --no-cache-dir gunicorn
 
 # (Optional) Copy configuration files
 # Uncomment the following lines if you have configuration files to include
 # COPY misc/config/*.cfg "${CONFIG_PATH}/"
 # COPY misc/config/resource/*.xml "${RESOURCE_PATH}/"
 
-# Set the working directory to the configuration path
-WORKDIR "${CONFIG_PATH}"
+ARG CONFIG_PATH=/etc/jasmin
+ENV CONFIG_PATH=${CONFIG_PATH}
 
-# Expose necessary ports
-EXPOSE 2775 8990 1401 8080
+ARG RESOURCE_PATH=/etc/jasmin/resource
+ENV RESOURCE_PATH=${RESOURCE_PATH}
 
-# (Optional) Define volumes
-# Uncomment the following line if you want to define Docker volumes
-# VOLUME ["/var/log/jasmin", "/etc/jasmin", "/etc/jasmin/store"]
+ARG STORE_PATH=/etc/jasmin/store
+ENV STORE_PATH=${STORE_PATH}
+
+ARG LOG_PATH=/var/log/jasmin
+ENV LOG_PATH=${LOG_PATH}
+
+RUN mkdir -p "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
+    && chown -R jasmin:jasmin "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
+    && chmod 777 "${LOG_PATH}"
+
 
 # Copy the entrypoint script and set execute permissions
 COPY ./compose/local/jasmin/entrypoint /entrypoint
@@ -85,9 +103,8 @@ RUN sed -i 's/\r$//g' /entrypoint && chmod +x /entrypoint
 COPY ./compose/local/jasmin/start /start
 RUN sed -i 's/\r$//g' /start && chmod +x /start
 
-
-#RUN mkdir -p "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}" \
-#    && chown -R jasmin:jasmin "${CONFIG_PATH}" "${RESOURCE_PATH}" "${STORE_PATH}" "${LOG_PATH}"
+# Set the working directory to the configuration path
+WORKDIR "${CONFIG_PATH}"
 
 # Switch to the non-root user
 #USER jasmin
@@ -95,4 +112,4 @@ RUN sed -i 's/\r$//g' /start && chmod +x /start
 # Define the entrypoint and default command
 ENTRYPOINT ["/entrypoint"]
 
-CMD ["jasmind.py", "--enable-interceptor-client", "--enable-dlr-thrower", "--enable-dlr-lookup", "-u", "jcliadmin", "-p", "jclipwd"]
+CMD ["jasmind.py", "--enable-interceptor-client", "--enable-dlr-thrower", "--enable-dlr-lookup", "-u", "${JCLI_ADMIN}", "-p", "${JCLI_PWD}"]

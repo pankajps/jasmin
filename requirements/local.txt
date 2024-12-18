@@ -1,0 +1,54 @@
+-r production.txt
+
+# Interactive Debugging Tools
+ipdb~=0.13.9
+pdbpp~=0.10.3
+
+# Testing Frameworks
+pytest~=7.2.0
+pytest-twisted~=0.11.0
+tox~=4.8.0
+
+# Monitoring and Task Management
+flower~=1.0.0
+
+# Code Quality and Formatting
+flake8~=6.0.0
+black~=23.1.0
+isort~=5.10.1
+
+# Logging Enhancements
+loguru~=0.7.0
+
+# Environment Management
+python-dotenv~=1.0.0
+
+# Security Auditing
+bandit~=1.7.0
+safety~=2.3.0
+
+# Static Type Checking
+mypy~=1.4.0
+
+# Code Coverage
+coverage~=7.2.0
+
+# Mocking and Stubbing
+responses~=0.22.0
+httpretty~=3.1.5
+
+# Documentation Tools
+sphinx~=7.1.2
+sphinx-autodoc-typehints~=1.20.3
+
+# Pre-commit Hooks
+pre-commit~=3.3.3
+
+# Real-time Error Tracking
+sentry-sdk~=1.22.0
+
+# API Documentation and Testing
+falcon-swagger-ui~=1.0.0  # if applicable
+
+# Additional Tools
+loguru~=0.7.0
